@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+
+# Runtime logs and generated datasets
+*.log
+validation_sample.csv
+COMPANYWEB29th_July.xlsx
+
+# Local environments and editor metadata
+.venv/
+venv/
+.env
+.idea/
+.vscode/
