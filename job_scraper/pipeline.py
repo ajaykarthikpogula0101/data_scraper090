@@ -16,6 +16,8 @@ from .config import (
 from .company import process_company
 from .session import ScrapeSession
 from .fields import now_iso
+from .clean_html import html_to_plain_text
+from .detect_language import detect_language
 
 log = logging.getLogger("job_scraper")
 
@@ -134,6 +136,8 @@ def run(
         scraped_at = now_iso()
         out_rows = []
         for j in jobs:
+            raw_description = j.get("job_description", "")
+            clean_description = html_to_plain_text(raw_description)
             out_rows.append({
                 "company_name": name,
                 "country": country,
@@ -142,15 +146,20 @@ def run(
                 "posted_date": j.get("posted_date", ""),
                 "closed_date": j.get("closed_date", ""),
                 "job_status": j.get("job_status", "Active"),
+                "last_checked_at": j.get("last_checked_at", ""),
                 "education_stream": j.get("education_stream", ""),
                 "education_type": j.get("education_type", ""),
                 "education_qualification": j.get("education_qualification", ""),
-                "years_of_experience": j.get("years_of_experience", ""),
+                "years_of_experience_min": j.get("years_of_experience_min", ""),
+                "years_of_experience_max": j.get("years_of_experience_max", ""),
                 "seniority_level": j.get("seniority_level", ""),
                 "employment_type": j.get("employment_type", ""),
                 "skills": j.get("skills", ""),
-                "job_description": j.get("job_description", ""),
+                "description_language": detect_language(clean_description),
+                "job_description": raw_description,
+                "job_description_clean": clean_description,
                 "job_url": j.get("job_url", ""),
+                "salary_disclosed": bool(j.get("salary") or j.get("min_salary") or j.get("max_salary")),
                 "salary": j.get("salary", ""),
                 "min_salary": j.get("min_salary", ""),
                 "max_salary": j.get("max_salary", ""),

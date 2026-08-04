@@ -10,5 +10,8 @@ COMPANYWEB29th_July.xlsx
 .venv/
 venv/
 .env
+*.checkpoint
+extraction_errors.csv
+company_jobs_output.csv
 .idea/
 .vscode/

@@ -191,7 +191,7 @@ def parse_jsonld_jobs(html_text, base_url=""):
                 continue
             job = {}
             job["job_title"] = _text(obj.get("title") or obj.get("name"))
-            job["job_url"] = clean_text(obj.get("url"))
+            job["job_url"] = clean_text(obj.get("url")) or clean_text(base_url)
             job["posted_date"] = parse_date(obj.get("datePosted"))
             job["closed_date"] = parse_date(obj.get("validThrough"))
             emp = obj.get("employmentType")

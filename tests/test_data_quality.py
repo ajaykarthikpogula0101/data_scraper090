@@ -1,0 +1,93 @@
+import csv
+import json
+import os
+import tempfile
+import unittest
+from datetime import datetime, timezone
+
+from job_scraper.clean_html import html_to_plain_text
+from job_scraper.detect_language import detect_language
+from job_scraper.llm_extract import ExtractionValidationError, validate_extraction
+from job_scraper.parsers_jsonld import parse_jsonld_jobs
+from job_scraper.recrawl_closed_check import classify_response, recrawl_csv
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, text="", url="https://example.test/job/1"):
+        self.status_code = status_code
+        self.text = text
+        self.url = url
+
+
+class FakeSession:
+    def __init__(self, response):
+        self.response = response
+
+    def fetch(self, *args, **kwargs):
+        return self.response
+
+
+class DataQualityTests(unittest.TestCase):
+    def test_jsonld_url_falls_back_to_fetched_page(self):
+        payload = {"@context": "https://schema.org", "@type": "JobPosting", "title": "Engineer"}
+        html = '<script type="application/ld+json">%s</script>' % json.dumps(payload)
+        jobs = parse_jsonld_jobs(html, base_url="https://example.test/jobs/123")
+        self.assertEqual(jobs[0]["job_url"], "https://example.test/jobs/123")
+
+    def test_html_cleaning_decodes_entities_and_removes_tags(self):
+        value = "<div>Hello &amp; welcome</div><script>bad()</script><p>Use &lt;tools&gt;</p>"
+        cleaned = html_to_plain_text(value)
+        self.assertEqual(cleaned, "Hello & welcome\nUse")
+        self.assertNotRegex(cleaned, r"<[^>]+>")
+
+    def test_language_detection_uses_clean_description(self):
+        self.assertEqual(detect_language("This is a software engineering role requiring Python experience."), "en")
+
+    def _valid_extraction(self, disclosed=False):
+        return {
+            "years_of_experience_min": 3,
+            "years_of_experience_max": 5,
+            "seniority_level": "Mid",
+            "education_stream": "Computer Science",
+            "education_type": "Bachelor's",
+            "education_qualification": "BSc in Computer Science",
+            "skills": ["Python", "SQL", "Python"],
+            "salary_disclosed": disclosed,
+        }
+
+    def test_salary_disclosure_requires_numeric_source_evidence(self):
+        result = validate_extraction(self._valid_extraction(disclosed=True), "Competitive compensation")
+        self.assertFalse(result["salary_disclosed"])
+        result = validate_extraction(self._valid_extraction(disclosed=True), "Salary: $50,000-$60,000 USD")
+        self.assertTrue(result["salary_disclosed"])
+
+    def test_malformed_extraction_is_rejected(self):
+        data = self._valid_extraction()
+        del data["skills"]
+        with self.assertRaises(ExtractionValidationError):
+            validate_extraction(data, "description")
+
+    def test_404_recrawl_marks_active_row_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "jobs.csv")
+            fields = ["job_title", "job_url", "job_status", "closed_date", "last_checked_at"]
+            with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow({"job_title": "Engineer", "job_url": "https://example.test/job/1",
+                                 "job_status": "Active", "closed_date": "", "last_checked_at": ""})
+            now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
+            stats = recrawl_csv(path, session=FakeSession(FakeResponse(status_code=404)), now=now)
+            with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(stats["closed"], 1)
+            self.assertEqual(row["job_status"], "Closed")
+            self.assertEqual(row["closed_date"], "2026-08-04")
+
+    def test_active_jsonld_remains_active(self):
+        html = '<script type="application/ld+json">{"@type":"JobPosting"}</script>'
+        self.assertEqual(classify_response(FakeResponse(text=html), "https://example.test/job/1"), (False, "active"))
+
+
+if __name__ == "__main__":
+    unittest.main()
