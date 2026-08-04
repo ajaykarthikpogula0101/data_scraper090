@@ -12,6 +12,7 @@ from job_scraper.llm_extract import ExtractionValidationError, validate_extracti
 from job_scraper.parsers_jsonld import parse_jsonld_jobs
 from job_scraper.recrawl_closed_check import classify_response, recrawl_csv
 from job_scraper import pipeline
+from job_scraper.company import _candidate_ats
 from job_scraper.ats import find_career_links, validate_career_page
 from job_scraper import websearch
 from bs4 import BeautifulSoup
@@ -113,6 +114,10 @@ class DataQualityTests(unittest.TestCase):
             '<a href="https://unrelated.test/jobs">Jobs elsewhere</a>', "html.parser")
         links = find_career_links(soup, "https://example.com", limit=10)
         self.assertEqual(links, ["https://jobs.lever.co/example"])
+
+    def test_bare_vendor_word_does_not_make_homepage_an_ats_board(self):
+        html = "<html><body><p>We leverage technology for our customers.</p></body></html>"
+        self.assertEqual(_candidate_ats(object(), "https://example.com", html), (None, None))
 
     def test_same_domain_career_page_requires_page_evidence(self):
         self.assertTrue(validate_career_page(

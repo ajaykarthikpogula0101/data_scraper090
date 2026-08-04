@@ -175,16 +175,16 @@ def find_career_links(soup, base_url, limit=10):
         for a in anchors:
             text = " ".join(a.get_text(" ", strip=True).split())
             href = a["href"]
-            if not is_career_link(text, href):
-                continue
             full = url_join(base_url, href)
             if not full:
+                continue
+            external_ats, _ = detect_ats_in_url(full)
+            if not is_career_link(text, href) and not external_ats:
                 continue
             if EXCLUDE_PATH_RE.search(full):
                 continue
             full_host = urlparse(full).hostname or ""
             same_domain = not base_dom or not full_host or registrable_domain(full_host) == base_dom
-            external_ats, _ = detect_ats_in_url(full)
             if not same_domain and not external_ats:
                 continue
             key = full.split("#")[0]

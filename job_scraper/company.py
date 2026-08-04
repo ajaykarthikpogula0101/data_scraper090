@@ -70,40 +70,21 @@ def _candidate_ats(session, candidate_url, html):
         return ats, captured
     if not html:
         return None, None
-    html_l = html.lower()
     soup = BeautifulSoup(html, "html.parser")
-    texts = [t for t in soup.stripped_strings][:200]
-    text_blob = " ".join(texts).lower()
-    blob = text_blob + " " + html_l
-    for name, markers in (
-        ("greenhouse", ["greenhouse", "boards.greenhouse", "grnh.se"]),
-        ("lever", ["lever", "jobs.lever.co"]),
-        ("smartrecruiters", ["smartrecruiters"]),
-        ("workable", ["workable"]),
-        ("teamtailor", ["teamtailor"]),
-        ("recruitee", ["recruitee"]),
-        ("breezy", ["breezy"]),
-        ("jazzhr", ["applytojob", "jazzhr"]),
-        ("bamboo", ["bamboohr"]),
-        ("personio", ["personio"]),
-        ("softgarden", ["softgarden"]),
-        ("workday", ["myworkdayjobs", "workday"]),
-        ("icims", ["icims"]),
-        ("taleo", ["taleo", "hcm.od.taleo"]),
-        ("successfactors", ["successfactors", "sap/job"]),
-        ("jobvite", ["jobvite"]),
-        ("join", ["join.com"]),
-        ("oracle", ["oraclecloud"]),
-        ("avature", ["avature"]),
-        ("talentsoft", ["talentsoft", "vscdn"]),
-    ):
-        if any(mk in blob for mk in markers):
-            return name, None
     # look at links inside the candidate page for ATS board URLs
     for a in soup.find_all("a", href=True):
-        n, cap = detect_ats_in_url(a["href"])
+        from .urlutils import url_join
+        n, cap = detect_ats_in_url(url_join(candidate_url, a["href"]))
         if n:
             return n, cap
+    # Embedded ATS URLs in scripts are useful; bare vendor words are not.
+    embedded = re.search(
+        r"https?://[^\"'\s<>]+(?:greenhouse\.io|lever\.co|smartrecruiters\.com|"
+        r"workable\.com|teamtailor\.com|recruitee\.com|breezy\.hr|applytojob\.com|"
+        r"bamboohr\.com|personio\.[a-z.]+|myworkdayjobs\.com|taleo\.net|jobvite\.com)[^\"'\s<>]*",
+        html, re.I)
+    if embedded:
+        return detect_ats_in_url(embedded.group(0))
     return None, None
 
 
@@ -200,22 +181,8 @@ def process_company_details(company_row, session=None, enable_search=True):
             candidate_methods[normalized] = method
     candidates = cands[:MAX_CAREER_LINKS]
 
-    # 3. Try homepage as a board too
-    ats, cap = _candidate_ats(session, homepage_url, homepage_html)
-    if ats:
-        discovery.update({
-            "career_page_url": homepage_url,
-            "career_page_status": "Validated",
-            "career_page_discovery_method": "homepage_ats",
-        })
-        src = ats
-        sources.append(src)
-        if ats in _KNOWN_GENERIC:
-            jobs.extend(parse_generic(session, homepage_url))
-        else:
-            jobs.extend(_dispatch(session, ats, homepage_url, cap))
-
-    # 4. process candidates
+    # 3. Process explicit career candidates. A vendor marker on a homepage is
+    # not enough to call the homepage a career page.
     for cand in candidates:
         if len(jobs) >= 50:
             break
@@ -247,7 +214,7 @@ def process_company_details(company_row, session=None, enable_search=True):
             # generic: parse the candidate page directly
             jobs.extend(parse_generic(session, cand))
 
-    # 5. dedupe jobs by url/title
+    # 4. dedupe jobs by url/title
     uniq = {}
     for j in jobs:
         key = (j.get("job_url") or "").strip() or (j.get("job_title") or "").strip()
