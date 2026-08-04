@@ -32,6 +32,7 @@ ATS_URL_PATTERNS = [
     ("freshteam", re.compile(r"([a-zA-Z0-9\-_]+)\.freshteam\.com")),
     ("jobadder", re.compile(r"([a-zA-Z0-9\-_]+)\.jobadder\.com")),
     ("bulhorn", re.compile(r"(?:bulhorn|vault)\.com")),
+    ("hrmanager", re.compile(r"candidate\.hr-manager\.net/(?:ApplicationInit\.aspx)?", re.I)),
     ("workable", re.compile(r"([a-zA-Z0-9\-_]+)\.workable\.com")),
 ]
 

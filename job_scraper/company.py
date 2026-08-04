@@ -20,7 +20,7 @@ _KNOWN_GENERIC = {
     "teamtailor", "softgarden", "join", "bamboo", "icims", "taleo",
     "jobvite", "oracle", "pinpoint", "zoho", "freshteam",
     "jobadder", "bulhorn", "indeed", "adzuna",
-    "avature", "talentsoft",
+    "avature", "talentsoft", "hrmanager",
 }
 
 _API_PARSERS = {

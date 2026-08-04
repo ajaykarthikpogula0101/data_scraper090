@@ -15,6 +15,7 @@ from job_scraper import pipeline
 from job_scraper.company import _candidate_ats
 from job_scraper.ats import find_career_links, validate_career_page
 from job_scraper import websearch
+from job_scraper.parsers_generic import _extract_listing_jobs
 from bs4 import BeautifulSoup
 
 
@@ -118,6 +119,15 @@ class DataQualityTests(unittest.TestCase):
     def test_bare_vendor_word_does_not_make_homepage_an_ats_board(self):
         html = "<html><body><p>We leverage technology for our customers.</p></body></html>"
         self.assertEqual(_candidate_ats(object(), "https://example.com", html), (None, None))
+
+    def test_hr_manager_listing_links_become_active_jobs(self):
+        html = '''<a href="https://candidate.hr-manager.net/ApplicationInit.aspx?ProjectId=143774&amp;cid=3112">
+        Ansøgningsfrist: 07. aug. 2026 Arkitekt til implementering af strategi</a>'''
+        jobs = _extract_listing_jobs(html, "https://aarhus.dk/job/job-i-aarhus-kommune")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["job_title"], "Arkitekt til implementering af strategi")
+        self.assertEqual(jobs[0]["job_status"], "Active")
+        self.assertIn("ProjectId=143774", jobs[0]["job_url"])
 
     def test_same_domain_career_page_requires_page_evidence(self):
         self.assertTrue(validate_career_page(

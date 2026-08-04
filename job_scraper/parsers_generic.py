@@ -12,9 +12,36 @@ from .config import MAX_JOB_DETAIL_PAGES, MAX_JOBS_PER_COMPANY
 JOB_LINK_RE = re.compile(
     r"(/job[s]?/[a-zA-Z0-9_\-]+|/jobdetail\b|jobdetail\.ftl|jobid\s*[=:]|"
     r"job-req\b|/position[s]?/[a-zA-Z0-9_\-]+|/officerole|careers/\d+|"
-    r"/job[s]?\.php|/viewjob\b|/careers/[a-z0-9\-]+/job)",
+    r"/job[s]?\.php|/viewjob\b|/careers/[a-z0-9\-]+/job|"
+    r"candidate\.hr-manager\.net/ApplicationInit\.aspx)",
     re.IGNORECASE,
 )
+
+HR_MANAGER_RE = re.compile(r"candidate\.hr-manager\.net/ApplicationInit\.aspx", re.I)
+
+
+def _extract_listing_jobs(html, base_url):
+    """Create minimal rows for explicit ATS job links on a listing page."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    jobs = []
+    seen = set()
+    for anchor in soup.find_all("a", href=True):
+        full = url_join(base_url, anchor["href"])
+        if not full or not HR_MANAGER_RE.search(full) or full in seen:
+            continue
+        title = clean_text(anchor.get_text(" ", strip=True), max_len=500)
+        title = re.sub(r"^Ansøgningsfrist:\s*\d{1,2}\.\s*[A-Za-zæøåÆØÅ]+\.\s*\d{4}\s*", "", title,
+                       flags=re.I)
+        if not title:
+            continue
+        job = empty_job()
+        job["job_title"] = title
+        job["job_url"] = full
+        job["job_status"] = "Active"
+        job["source"] = "hrmanager-listing"
+        jobs.append(job)
+        seen.add(full)
+    return jobs
 
 EXCLUDE = re.compile(
     r"(javascript:|mailto:|tel:|#|\.(jpg|jpeg|png|gif|svg|css|js|pdf|zip|mp4)"
@@ -69,15 +96,20 @@ def parse_generic(session, url):
     jobs = parse_jsonld_jobs(html, url)
     if not jobs:
         jobs = parse_microdata_jobs(html, url)
+    if not jobs:
+        jobs = _extract_listing_jobs(html, url)
     job_links = _extract_job_links(html, url)
     detail_jobs = []
     for link in job_links[:MAX_JOB_DETAIL_PAGES]:
         detail = session.fetch_text(link, timeout=25)
         if not detail:
             continue
-        detail_jobs.extend(parse_jsonld_jobs(detail, link))
-        if not any(x["job_title"] or x["job_url"] for x in detail_jobs[-MAX_JOB_DETAIL_PAGES:]):
-            detail_jobs.extend(parse_microdata_jobs(detail, link))
+        parsed = parse_jsonld_jobs(detail, link)
+        if not parsed:
+            parsed = parse_microdata_jobs(detail, link)
+        if not parsed:
+            parsed = _extract_listing_jobs(detail, link)
+        detail_jobs.extend(parsed)
     combined = _merge_jobs([jobs, detail_jobs])
     for j in combined:
         if not j["source"]:
