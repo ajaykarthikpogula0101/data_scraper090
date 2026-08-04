@@ -36,6 +36,20 @@ class DataQualityTests(unittest.TestCase):
         jobs = parse_jsonld_jobs(html, base_url="https://example.test/jobs/123")
         self.assertEqual(jobs[0]["job_url"], "https://example.test/jobs/123")
 
+    def test_jsonld_rejects_placeholder_fields(self):
+        payload = {
+            "@context": "https://schema.org", "@type": "JobPosting", "title": "Analyst",
+            "educationRequirements": {"name": "UNAVAILABLE"},
+            "qualifications": "<p>Full requirements paragraph, not a skill list</p>",
+            "baseSalary": {"currency": "USD", "value": {"minValue": 0, "maxValue": 0}},
+        }
+        html = '<script type="application/ld+json">%s</script>' % json.dumps(payload)
+        job = parse_jsonld_jobs(html, base_url="https://example.test/job")[0]
+        self.assertEqual(job["education_stream"], "")
+        self.assertEqual(job["skills"], "")
+        self.assertEqual((job["salary"], job["min_salary"], job["max_salary"], job["currency"]),
+                         ("", "", "", ""))
+
     def test_html_cleaning_decodes_entities_and_removes_tags(self):
         value = "<div>Hello &amp; welcome</div><script>bad()</script><p>Use &lt;tools&gt;</p>"
         cleaned = html_to_plain_text(value)

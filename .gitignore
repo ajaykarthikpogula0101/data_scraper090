@@ -14,5 +14,6 @@ venv/
 extraction_errors.csv
 company_jobs_output.csv
 sample_quality_check.csv
+sample_quality_check_v2.csv
 .idea/
 .vscode/

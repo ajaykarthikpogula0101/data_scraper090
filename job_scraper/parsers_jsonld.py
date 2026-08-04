@@ -2,6 +2,7 @@ import json
 import re
 
 from bs4 import BeautifulSoup
+from .clean_html import html_to_plain_text
 
 from .fields import (
     clean_text,
@@ -112,6 +113,13 @@ def _extract_min_max(salary_obj):
             cur = currency_from_salary(txt)
     if not cur:
         cur = currency_from_salary(salary_obj.get("description"))
+    # Some feeds publish zero-valued placeholder salary objects. Zero is not a
+    # disclosed salary and must never be exported as compensation evidence.
+    numeric_values = [value for value in (mn, mx) if value]
+    if numeric_values and all(float(value) <= 0 for value in numeric_values):
+        return "", "", "", ""
+    if not display and not mn and not mx:
+        return "", "", "", ""
     return display, mn, mx, cur
 
 
@@ -150,11 +158,18 @@ def _extract_education(req):
                 qual = txt
             else:
                 stream = txt
+    placeholders = {"unavailable", "not specified", "not applicable", "n/a", "na", "none"}
+    if stream.strip().lower() in placeholders:
+        stream = ""
+    if etype.strip().lower() in placeholders:
+        etype = ""
+    if qual.strip().lower() in placeholders:
+        qual = ""
     return stream, etype, qual
 
 
 def _extract_skills(entry):
-    """Collect skills from skills, knowsAbout, qualifications, description keywords."""
+    """Collect only explicitly structured skill values."""
     skills = set()
     for key in ("skills", "knowsAbout", "about"):
         v = entry.get(key)
@@ -165,18 +180,16 @@ def _extract_skills(entry):
                     if name:
                         skills.add(name)
                 else:
-                    name = clean_text(item)
+                    name = html_to_plain_text(item)
                     if name:
                         skills.add(name)
         elif isinstance(v, dict):
             name = _text(v.get("name"))
             if name:
                 skills.add(name)
-    quals = entry.get("qualifications")
-    if quals:
-        txt = _text(quals)
-        skills.add(txt)
-    return join_list(sorted(skills))
+    # `qualifications` is commonly the entire requirements section as HTML,
+    # not a skill list. The LLM post-processing pass handles that prose.
+    return join_list(sorted(skill for skill in skills if len(skill) <= 300))
 
 
 def parse_jsonld_jobs(html_text, base_url=""):
