@@ -29,19 +29,97 @@ def _extract_listing_jobs(html, base_url):
         full = url_join(base_url, anchor["href"])
         if not full or not HR_MANAGER_RE.search(full) or full in seen:
             continue
-        title = clean_text(anchor.get_text(" ", strip=True), max_len=500)
-        title = re.sub(r"^Ansøgningsfrist:\s*\d{1,2}\.\s*[A-Za-zæøåÆØÅ]+\.\s*\d{4}\s*", "", title,
-                       flags=re.I)
+        row = anchor.find_parent("tr")
+        cells = [clean_text(cell.get_text(" ", strip=True), max_len=500)
+                 for cell in row.find_all("td", recursive=False)] if row else []
+        if len(cells) >= 5:
+            title, category, employment_type, location, deadline = cells[:5]
+        else:
+            title = clean_text(anchor.get_text(" ", strip=True), max_len=500)
+            title = re.sub(r"^Ansøgningsfrist:\s*\d{1,2}\.\s*[A-Za-zæøåÆØÅ]+\.\s*\d{4}\s*", "", title,
+                           flags=re.I)
+            category = employment_type = location = deadline = ""
         if not title:
             continue
         job = empty_job()
         job["job_title"] = title
+        job["job_category"] = "" if category in ("-", "–") else category
+        job["job_location"] = location
+        job["employment_type"] = employment_type
+        job["application_deadline"] = "" if "invalid" in deadline.lower() else parse_date(deadline)
         job["job_url"] = full
         job["job_status"] = "Active"
         job["source"] = "hrmanager-listing"
         jobs.append(job)
         seen.add(full)
     return jobs
+
+
+def _meta_content(soup, key):
+    tag = soup.find("meta", attrs={"property": key}) or soup.find("meta", attrs={"name": key})
+    return clean_text(tag.get("content"), max_len=1000) if tag else ""
+
+
+def _parse_hrmanager_date(text):
+    match = re.search(r"\b(\d{1,2})-(\d{1,2})-(\d{4})\b", text or "")
+    if match:
+        return "%s-%02d-%02d" % (match.group(3), int(match.group(2)), int(match.group(1)))
+    return parse_date(text)
+
+
+def _hrmanager_labeled_value(container, labels):
+    if not container:
+        return ""
+    text = clean_text(container.get_text(" ", strip=True), max_len=1000)
+    for label in labels:
+        text = re.sub(r"^%s\s*" % re.escape(label), "", text, flags=re.I)
+    return text.strip()
+
+
+def _parse_hrmanager_detail(html, url, seed=None):
+    """Extract explicit HR-Manager/Talentech detail fields without inference."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    job = empty_job()
+    if seed:
+        job.update(seed)
+    title = _meta_content(soup, "og:title") or _meta_content(soup, "twitter:title")
+    if title:
+        job["job_title"] = title
+    description = soup.find(id="AdvertisementInnerContent")
+    if description:
+        job["job_description"] = str(description)
+    posted = _meta_content(soup, "article:published_time")
+    if posted:
+        job["posted_date"] = parse_date(posted)
+    deadline_box = soup.select_one(".frist")
+    if deadline_box:
+        deadline = _parse_hrmanager_date(deadline_box.get_text(" ", strip=True))
+        if deadline:
+            job["application_deadline"] = deadline
+    category_box = soup.select_one(".jobtype")
+    if category_box and not job.get("job_category"):
+        job["job_category"] = _hrmanager_labeled_value(
+            category_box, ("Tjänst", "Stilling", "Jobtype", "Category"))
+    keywords = _meta_content(soup, "keywords")
+    parts = [part.strip() for part in keywords.split(",") if part.strip()]
+    if len(parts) >= 3:
+        if not job.get("job_location"):
+            job["job_location"] = ", ".join(parts[1:-1])
+    job["job_url"] = url
+    job["job_status"] = "Active"
+    job["source"] = "hrmanager-detail"
+    return job
+
+
+def _enrich_hrmanager_jobs(session, jobs):
+    enriched = []
+    for job in jobs:
+        if not HR_MANAGER_RE.search(job.get("job_url") or ""):
+            enriched.append(job)
+            continue
+        detail = session.fetch_text(job["job_url"], timeout=30)
+        enriched.append(_parse_hrmanager_detail(detail, job["job_url"], seed=job) if detail else job)
+    return enriched
 
 EXCLUDE = re.compile(
     r"(javascript:|mailto:|tel:|#|\.(jpg|jpeg|png|gif|svg|css|js|pdf|zip|mp4)"
@@ -111,6 +189,7 @@ def parse_generic(session, url):
             parsed = _extract_listing_jobs(detail, link)
         detail_jobs.extend(parsed)
     combined = _merge_jobs([jobs, detail_jobs])
+    combined = _enrich_hrmanager_jobs(session, combined)
     for j in combined:
         if not j["source"]:
             j["source"] = "generic"

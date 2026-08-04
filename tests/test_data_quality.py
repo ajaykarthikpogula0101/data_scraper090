@@ -15,7 +15,8 @@ from job_scraper import pipeline
 from job_scraper.company import _candidate_ats
 from job_scraper.ats import find_career_links, validate_career_page
 from job_scraper import websearch
-from job_scraper.parsers_generic import _extract_listing_jobs
+from job_scraper.parsers_generic import _extract_listing_jobs, _parse_hrmanager_detail
+from job_scraper.fields import empty_job
 from bs4 import BeautifulSoup
 
 
@@ -128,6 +129,36 @@ class DataQualityTests(unittest.TestCase):
         self.assertEqual(jobs[0]["job_title"], "Arkitekt til implementering af strategi")
         self.assertEqual(jobs[0]["job_status"], "Active")
         self.assertIn("ProjectId=143774", jobs[0]["job_url"])
+
+    def test_hr_manager_table_and_detail_fields_map_to_correct_columns(self):
+        listing = '''<table><tr><td>Indkøbselev</td><td>Logistics and Purchase</td>
+        <td>Full-time</td><td>Danmark</td><td>August 31, 2026</td>
+        <td><a href="https://candidate.hr-manager.net/ApplicationInit.aspx?ProjectId=143922">Apply</a></td>
+        </tr></table>'''
+        seed = _extract_listing_jobs(listing, "https://aasted.eu/career/")[0]
+        detail = '''<html><head><meta property="og:title" content="Indkøbselev">
+        <meta property="article:published_time" content="2026-06-11T07:40:34Z">
+        <meta name="keywords" content=",Indkøbselev,Bygmarken 7-17, 3520 Farum, Denmark,Logistics and Purchase">
+        </head><body><div id="AdvertisementInnerContent"><p>Full job description.</p></div>
+        <div class="frist">Ansøgningsfrist 31-08-2026</div></body></html>'''
+        job = _parse_hrmanager_detail(detail, seed["job_url"], seed)
+        self.assertEqual(job["job_title"], "Indkøbselev")
+        self.assertEqual(job["job_category"], "Logistics and Purchase")
+        self.assertEqual(job["job_location"], "Danmark")
+        self.assertEqual(job["employment_type"], "Full-time")
+        self.assertEqual(job["application_deadline"], "2026-08-31")
+        self.assertEqual(job["posted_date"], "2026-06-11")
+        self.assertIn("Full job description", job["job_description"])
+        self.assertEqual(job["source"], "hrmanager-detail")
+
+    def test_hr_manager_does_not_guess_category_from_keywords(self):
+        seed = empty_job()
+        seed.update({"job_title": "Unsolicited application", "job_location": "Denmark",
+                     "job_url": "https://candidate.hr-manager.net/ApplicationInit.aspx?ProjectId=1"})
+        detail = '''<meta property="og:title" content="Unsolicited application">
+        <meta name="keywords" content=",Unsolicited application,Denmark">'''
+        job = _parse_hrmanager_detail(detail, seed["job_url"], seed)
+        self.assertEqual(job["job_category"], "")
 
     def test_same_domain_career_page_requires_page_evidence(self):
         self.assertTrue(validate_career_page(

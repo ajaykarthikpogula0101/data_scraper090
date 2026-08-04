@@ -233,7 +233,10 @@ def salary_breakdown(salary_text):
 def empty_job():
     return {
         "job_title": "",
+        "job_category": "",
+        "job_location": "",
         "posted_date": "",
+        "application_deadline": "",
         "closed_date": "",
         "job_status": "",
         "last_checked_at": "",

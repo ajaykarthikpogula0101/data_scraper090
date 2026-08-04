@@ -52,6 +52,9 @@ class ScrapeSession:
         if r is None:
             return None
         if r.status_code not in (200, 201, 203):
+            if r.status_code in (403, 405, 406, 423, 429, 451, 455):
+                from .browser_fetch import fetch_rendered_html
+                return fetch_rendered_html(url)
             return None
         ctype = r.headers.get("Content-Type", "").lower()
         if "json" in ctype:
