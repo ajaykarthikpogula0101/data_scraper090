@@ -167,6 +167,15 @@ def run(
                 "source": j.get("source", "") or source,
                 "scraped_at": scraped_at,
             })
+        if not out_rows:
+            out_rows.append({
+                "company_name": name,
+                "country": country,
+                "website": web,
+                "job_status": "No Jobs Found" if status == "no_jobs" else status.replace("_", " ").title(),
+                "source": source,
+                "scraped_at": scraped_at,
+            })
         writer.write_rows(out_rows)
         with counters_lock:
             counters["processed"] += 1

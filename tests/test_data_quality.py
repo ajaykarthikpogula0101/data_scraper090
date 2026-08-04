@@ -4,12 +4,14 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from job_scraper.clean_html import html_to_plain_text
 from job_scraper.detect_language import detect_language
 from job_scraper.llm_extract import ExtractionValidationError, validate_extraction
 from job_scraper.parsers_jsonld import parse_jsonld_jobs
 from job_scraper.recrawl_closed_check import classify_response, recrawl_csv
+from job_scraper import pipeline
 
 
 class FakeResponse:
@@ -87,6 +89,21 @@ class DataQualityTests(unittest.TestCase):
     def test_active_jsonld_remains_active(self):
         html = '<script type="application/ld+json">{"@type":"JobPosting"}</script>'
         self.assertEqual(classify_response(FakeResponse(text=html), "https://example.test/job/1"), (False, "active"))
+
+    def test_company_without_jobs_still_gets_output_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "jobs.csv")
+            companies = [("Example Ltd", "https://example.test", "India")]
+            with patch.object(pipeline, "read_companies", return_value=companies), \
+                    patch.object(pipeline, "process_company", return_value=("no_jobs", [], "homepage")):
+                pipeline.run(input_file="unused.xlsx", output_file=path, workers=1, resume=False)
+            with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["company_name"], "Example Ltd")
+            self.assertEqual(rows[0]["country"], "India")
+            self.assertEqual(rows[0]["website"], "https://example.test")
+            self.assertEqual(rows[0]["job_status"], "No Jobs Found")
 
 
 if __name__ == "__main__":
