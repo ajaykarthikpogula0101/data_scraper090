@@ -36,6 +36,14 @@ _API_PARSERS = {
     "successfactors": parsers_ats.parse_successfactors,
 }
 
+_EXPLICIT_NO_JOBS_RE = re.compile(
+    r"\b(?:no|not currently any|currently no)\s+(?:open\s+)?(?:positions|jobs|vacancies|openings)\b|"
+    r"\bwe (?:do not|don't) have any (?:openings|vacancies)\b|"
+    r"\bingen ledige stillinger\b|\bkeine (?:offenen )?(?:stellen|stellenangebote)\b|"
+    r"\baucune offre d['’]emploi\b|\bno hay (?:vacantes|puestos disponibles)\b",
+    re.IGNORECASE,
+)
+
 
 def _ats_info(ats, url, captured):
     info = {"board": captured or "", "base_url": url}
@@ -118,6 +126,7 @@ def process_company_details(company_row, session=None, enable_search=True):
     jobs = []
     tried = set()
     homepage_html = None
+    explicit_no_jobs = False
 
     # 1. fetch homepage
     resp = session.fetch(base, timeout=20)
@@ -193,6 +202,9 @@ def process_company_details(company_row, session=None, enable_search=True):
         cand_html = session.fetch_text(cand, timeout=25)
         if not cand_html and not ats:
             continue
+        if cand_html and _EXPLICIT_NO_JOBS_RE.search(
+                BeautifulSoup(cand_html, "html.parser").get_text(" ", strip=True)):
+            explicit_no_jobs = True
         if not discovery["career_page_url"] and (
                 (cand_html and validate_career_page(cand, cand_html, homepage_url)) or ats):
             discovery.update({
@@ -231,7 +243,11 @@ def process_company_details(company_row, session=None, enable_search=True):
             from .parsers_jsonld import parse_jsonld_jobs
             jobs = parse_jsonld_jobs(homepage_html, homepage_url)
         if not jobs:
-            return result("no_jobs", [], ";".join(sources))
+            if explicit_no_jobs:
+                return result("no_jobs", [], ";".join(sources))
+            if discovery["career_page_url"]:
+                return result("unsupported", [], ";".join(sources))
+            return result("career_not_found", [], ";".join(sources))
         if not discovery["career_page_url"]:
             discovery.update({
                 "career_page_url": homepage_url,

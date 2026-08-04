@@ -15,7 +15,8 @@ from job_scraper import pipeline
 from job_scraper.company import _candidate_ats
 from job_scraper.ats import find_career_links, validate_career_page
 from job_scraper import websearch
-from job_scraper.parsers_generic import _extract_listing_jobs, _parse_hrmanager_detail
+from job_scraper.parsers_generic import (_extract_listing_jobs, _parse_hrmanager_detail,
+                                         _parse_generic_detail)
 from job_scraper.fields import empty_job
 from bs4 import BeautifulSoup
 
@@ -159,6 +160,21 @@ class DataQualityTests(unittest.TestCase):
         <meta name="keywords" content=",Unsolicited application,Denmark">'''
         job = _parse_hrmanager_detail(detail, seed["job_url"], seed)
         self.assertEqual(job["job_category"], "")
+
+    def test_generic_detail_maps_only_labeled_fields(self):
+        html = '''<html><head><meta property="og:title" content="Data Engineer"></head><body>
+        <dl><dt>Location</dt><dd>London</dd><dt>Employment Type</dt><dd>Full-time</dd>
+        <dt>Application Deadline</dt><dd>August 31, 2026</dd></dl>
+        <main><h2>About the role</h2><p>Apply to build reliable data platforms with our engineering team.
+        This role includes pipeline ownership, testing, monitoring, documentation, and collaboration.</p></main>
+        </body></html>'''
+        job = _parse_generic_detail(html, "https://example.test/jobs/data-engineer")
+        self.assertEqual(job["job_title"], "Data Engineer")
+        self.assertEqual(job["job_location"], "London")
+        self.assertEqual(job["employment_type"], "Full-time")
+        self.assertEqual(job["application_deadline"], "2026-08-31")
+        self.assertEqual(job["salary"], "")
+        self.assertIn("pipeline ownership", job["job_description"])
 
     def test_same_domain_career_page_requires_page_evidence(self):
         self.assertTrue(validate_career_page(

@@ -121,7 +121,8 @@ def run(
     todo = [c for c in companies if _company_key(c) not in completed]
     log.info("Skipping %d already processed; %d to do", len(companies) - len(todo), len(todo))
 
-    counters = {"processed": 0, "ok": 0, "no_jobs": 0, "unreachable": 0, "error": 0, "jobs": 0}
+    counters = {"processed": 0, "ok": 0, "no_jobs": 0, "unsupported": 0,
+                "career_not_found": 0, "unreachable": 0, "error": 0, "jobs": 0}
     counters_lock = threading.Lock()
     session_factory = lambda: ScrapeSession()
 
@@ -141,6 +142,8 @@ def run(
         for j in jobs:
             raw_description = j.get("job_description", "")
             clean_description = html_to_plain_text(raw_description)
+            job_source = j.get("source", "") or source
+            structured_source = job_source in ("jsonld", "microdata", "hrmanager-detail")
             out_rows.append({
                 "company_name": name,
                 "country": country,
@@ -155,6 +158,9 @@ def run(
                 "application_deadline": j.get("application_deadline", ""),
                 "closed_date": j.get("closed_date", ""),
                 "job_status": j.get("job_status", "Active"),
+                "extraction_status": "Job Detail Extracted",
+                "extraction_confidence": "High" if structured_source else "Medium",
+                "extraction_evidence": job_source,
                 "last_checked_at": j.get("last_checked_at", ""),
                 "education_stream": j.get("education_stream", ""),
                 "education_type": j.get("education_type", ""),
@@ -173,7 +179,7 @@ def run(
                 "min_salary": j.get("min_salary", ""),
                 "max_salary": j.get("max_salary", ""),
                 "currency": j.get("currency", ""),
-                "source": j.get("source", "") or source,
+                "source": job_source,
                 "scraped_at": scraped_at,
             })
         if not out_rows:
@@ -184,7 +190,19 @@ def run(
                 "career_page_url": details.get("career_page_url", ""),
                 "career_page_status": details.get("career_page_status", ""),
                 "career_page_discovery_method": details.get("career_page_discovery_method", ""),
-                "job_status": "No Jobs Found" if status == "no_jobs" else status.replace("_", " ").title(),
+                "job_status": {
+                    "no_jobs": "No Jobs Found",
+                    "unsupported": "Career Page Found - Extraction Unsupported",
+                    "career_not_found": "Career Page Not Found",
+                }.get(status, status.replace("_", " ").title()),
+                "extraction_status": {
+                    "no_jobs": "Explicit No-Openings Evidence",
+                    "unsupported": "Extraction Unsupported",
+                    "career_not_found": "Career Page Not Found",
+                    "unreachable": "Website Unreachable",
+                }.get(status, "Processing Error"),
+                "extraction_confidence": "High" if status == "no_jobs" else "Low",
+                "extraction_evidence": source,
                 "source": source,
                 "scraped_at": scraped_at,
             })
