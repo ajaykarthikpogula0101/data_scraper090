@@ -26,7 +26,7 @@ def main():
     countries = [c.strip() for c in args.countries.split(",") if c.strip()] if args.countries else None
 
     if args.verify:
-        from job_scraper.company import process_company
+        from job_scraper.company import process_company_details
         from job_scraper.pipeline import read_companies
         companies = read_companies(args.input)
         match = [c for c in companies if c[0].strip().lower() == args.verify.strip().lower()]
@@ -35,8 +35,12 @@ def main():
             return 1
         name, web, country = match[0]
         print("Processing: %s | %s | %s" % (name, web, country))
-        status, jobs, source = process_company((name, web, country))
+        details = process_company_details((name, web, country))
+        status, jobs, source = details["status"], details["jobs"], details["source"]
         print("status:", status, "| source:", source, "| jobs:", len(jobs))
+        print("career page:", details["career_page_url"] or "not found",
+              "| validation:", details["career_page_status"],
+              "| method:", details["career_page_discovery_method"] or "n/a")
         for j in jobs[:20]:
             print(
                 "- %s | posted=%s | emp=%s | %s"

@@ -5,7 +5,7 @@ from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 from requests import Session as _ReqSession
 
-from .ats import registrable_domain
+from .ats import registrable_domain, detect_ats_in_url, is_career_link
 from .config import SEARCH_TIMEOUT
 from .urlutils import ensure_https, hostname
 
@@ -129,3 +129,38 @@ def search_company_website(name, session, country=None, limit=5):
 
     ranked = sorted(scored.items(), key=lambda x: -x[1])
     return [_root_url(dom) for dom, _ in ranked[:limit]]
+
+
+def search_company_career_pages(name, official_url, session, country=None, limit=3):
+    """Find likely official career pages while rejecting unrelated job sites."""
+    official_domain = registrable_domain(hostname(ensure_https(official_url)))
+    if not official_domain:
+        return []
+    query_name = '"%s" careers jobs' % name
+    queries = ["site:%s careers jobs" % official_domain, query_name]
+    if country:
+        queries.append(query_name + " " + country)
+    results = []
+    for query in queries:
+        results.extend(_search_bing_rss(session, query))
+    if not results:
+        for query in queries[:2]:
+            results.extend(_search_duckduckgo(session, query))
+    accepted = []
+    seen = set()
+    company_tokens = _tokens(name)
+    for url in results:
+        url = ensure_https(url).split("#")[0]
+        if not url or url in seen:
+            continue
+        result_domain = registrable_domain(hostname(url))
+        ats, captured = detect_ats_in_url(url)
+        same_domain = result_domain == official_domain
+        ats_matches_company = bool(ats and captured and any(token in captured.lower() for token in company_tokens))
+        if not ((same_domain and is_career_link("", url)) or ats_matches_company):
+            continue
+        seen.add(url)
+        accepted.append(url)
+        if len(accepted) >= limit:
+            break
+    return accepted

@@ -13,7 +13,7 @@ from .config import (
     DEFAULT_WORKERS,
     LOG_FILE,
 )
-from .company import process_company
+from .company import process_company_details
 from .session import ScrapeSession
 from .fields import now_iso
 from .clean_html import html_to_plain_text
@@ -130,9 +130,12 @@ def run(
         name, web, country = row
         try:
             session = session_factory()
-            status, jobs, source = process_company(row, session, enable_search=enable_search)
+            details = process_company_details(row, session, enable_search=enable_search)
+            status, jobs, source = details["status"], details["jobs"], details["source"]
         except Exception as exc:
             status, jobs, source = "error", [], str(exc)[:200]
+            details = {"career_page_url": "", "career_page_status": "Error",
+                       "career_page_discovery_method": ""}
         scraped_at = now_iso()
         out_rows = []
         for j in jobs:
@@ -142,6 +145,9 @@ def run(
                 "company_name": name,
                 "country": country,
                 "website": web,
+                "career_page_url": details.get("career_page_url", ""),
+                "career_page_status": details.get("career_page_status", ""),
+                "career_page_discovery_method": details.get("career_page_discovery_method", ""),
                 "job_title": j.get("job_title", ""),
                 "posted_date": j.get("posted_date", ""),
                 "closed_date": j.get("closed_date", ""),
@@ -172,6 +178,9 @@ def run(
                 "company_name": name,
                 "country": country,
                 "website": web,
+                "career_page_url": details.get("career_page_url", ""),
+                "career_page_status": details.get("career_page_status", ""),
+                "career_page_discovery_method": details.get("career_page_discovery_method", ""),
                 "job_status": "No Jobs Found" if status == "no_jobs" else status.replace("_", " ").title(),
                 "source": source,
                 "scraped_at": scraped_at,

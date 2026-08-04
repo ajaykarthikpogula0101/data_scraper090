@@ -165,7 +165,7 @@ def registrable_domain(host):
 
 
 def find_career_links(soup, base_url, limit=10):
-    """Return candidate career page URLs found in homepage HTML."""
+    """Return official-domain or recognized ATS career links from a homepage."""
     found = []
     seen = set()
     if soup:
@@ -183,7 +183,9 @@ def find_career_links(soup, base_url, limit=10):
             if EXCLUDE_PATH_RE.search(full):
                 continue
             full_host = urlparse(full).hostname or ""
-            if base_dom and full_host and registrable_domain(full_host) != base_dom:
+            same_domain = not base_dom or not full_host or registrable_domain(full_host) == base_dom
+            external_ats, _ = detect_ats_in_url(full)
+            if not same_domain and not external_ats:
                 continue
             key = full.split("#")[0]
             if key in seen:
@@ -204,6 +206,25 @@ def find_career_links(soup, base_url, limit=10):
 
     found.sort(key=score)
     return [u for _, u in found[:limit]]
+
+
+def validate_career_page(url, html_text, company_home_url=""):
+    """Validate a career candidate using domain ownership and page evidence."""
+    if not url or not html_text:
+        return False
+    candidate_host = urlparse(ensure_https(url)).hostname or ""
+    company_host = urlparse(ensure_https(company_home_url)).hostname or ""
+    same_domain = bool(candidate_host and company_host and
+                       registrable_domain(candidate_host) == registrable_domain(company_host))
+    ats, _ = detect_ats_in_url(url)
+    soup = BeautifulSoup(html_text, "html.parser")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    headings = " ".join(tag.get_text(" ", strip=True) for tag in soup.find_all(["h1", "h2", "h3"]))
+    page_signal = is_career_link(title + " " + headings, url)
+    jobposting_signal = bool(re.search(r'[@\"\']type[\"\']?\s*:\s*[\"\']JobPosting', html_text, re.I))
+    job_link_signal = any(is_career_link(a.get_text(" ", strip=True), a.get("href", ""))
+                          for a in soup.find_all("a", href=True)[:500])
+    return bool((same_domain or ats) and (ats or page_signal or jobposting_signal or job_link_signal))
 
 
 def common_career_urls(base_url):

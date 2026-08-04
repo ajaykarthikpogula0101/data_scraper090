@@ -8,10 +8,11 @@ from .ats import (
     detect_ats_in_url,
     find_career_links,
     common_career_urls,
+    validate_career_page,
 )
 from .urlutils import ensure_https, normalize_website, hostname
 from .session import ScrapeSession
-from .websearch import search_company_website
+from .websearch import search_company_website, search_company_career_pages
 from . import parsers_ats
 from .parsers_generic import parse_generic
 
@@ -106,25 +107,33 @@ def _candidate_ats(session, candidate_url, html):
     return None, None
 
 
-def process_company(company_row, session=None, enable_search=True):
+def process_company_details(company_row, session=None, enable_search=True):
     """
     company_row: (company_name, website, country)
-    Returns (status, jobs, source) where jobs is a list of dicts.
-    status: "ok" | "no_jobs" | "unreachable" | "error"
+    Return status/jobs plus auditable career-page discovery metadata.
     """
     name, website, country = company_row
     session = session or ScrapeSession()
     base = normalize_website(website)
     sources = []
+    discovery = {
+        "career_page_url": "",
+        "career_page_status": "Not Found",
+        "career_page_discovery_method": "",
+    }
+
+    def result(status, jobs, source):
+        return {"status": status, "jobs": jobs, "source": source, **discovery}
+
     if not base:
         if enable_search:
             found = search_company_website(name, session, country=country)
             if not found:
-                return "unreachable", [], "no_website"
+                return result("unreachable", [], "no_website")
             base = found[0]
             sources.append("websearch")
         else:
-            return "unreachable", [], "no_website"
+            return result("unreachable", [], "no_website")
     jobs = []
     tried = set()
     homepage_html = None
@@ -157,35 +166,48 @@ def process_company(company_row, session=None, enable_search=True):
                         if "json" not in ctype.lower():
                             homepage_html = resp3.text
                     else:
-                        return "unreachable", [], ";".join(sources)
+                        return result("unreachable", [], ";".join(sources))
                 else:
-                    return "unreachable", [], ";".join(sources)
+                    return result("unreachable", [], ";".join(sources))
             else:
-                return "unreachable", [], ""
+                return result("unreachable", [], "")
 
     # 2. build candidate career urls
     candidates = []
     soup = BeautifulSoup(homepage_html or "", "html.parser")
     found_links = find_career_links(soup, homepage_url, limit=MAX_CAREER_LINKS)
     candidates.extend(found_links)
+    candidate_methods = {url: "homepage_link" for url in found_links}
     if not found_links:
         # probe a handful of common paths
         for u, _ in common_career_urls(homepage_url)[:4]:
             candidates.append(u)
+            candidate_methods[u] = "common_path_probe"
+        if enable_search:
+            for u in search_company_career_pages(name, homepage_url, session, country=country):
+                candidates.append(u)
+                candidate_methods[u] = "web_search"
 
     # dedupe candidates
     seen = set()
     cands = []
     for u in candidates:
-        u = u.split("#")[0].rstrip("/")
-        if u and u not in seen:
-            seen.add(u)
-            cands.append(u)
+        method = candidate_methods.get(u, "homepage_link")
+        normalized = u.split("#")[0].rstrip("/")
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            cands.append(normalized)
+            candidate_methods[normalized] = method
     candidates = cands[:MAX_CAREER_LINKS]
 
     # 3. Try homepage as a board too
     ats, cap = _candidate_ats(session, homepage_url, homepage_html)
     if ats:
+        discovery.update({
+            "career_page_url": homepage_url,
+            "career_page_status": "Validated",
+            "career_page_discovery_method": "homepage_ats",
+        })
         src = ats
         sources.append(src)
         if ats in _KNOWN_GENERIC:
@@ -201,11 +223,17 @@ def process_company(company_row, session=None, enable_search=True):
             continue
         tried.add(cand)
         ats, cap = detect_ats_in_url(cand)
-        cand_html = None
+        cand_html = session.fetch_text(cand, timeout=25)
+        if not cand_html and not ats:
+            continue
+        if not discovery["career_page_url"] and (
+                (cand_html and validate_career_page(cand, cand_html, homepage_url)) or ats):
+            discovery.update({
+                "career_page_url": cand,
+                "career_page_status": "Validated",
+                "career_page_discovery_method": candidate_methods.get(cand, "homepage_link"),
+            })
         if not ats:
-            cand_html = session.fetch_text(cand, timeout=25)
-            if not cand_html:
-                continue
             ats, cap = _candidate_ats(session, cand, cand_html)
         if ats:
             src = ats
@@ -236,7 +264,19 @@ def process_company(company_row, session=None, enable_search=True):
             from .parsers_jsonld import parse_jsonld_jobs
             jobs = parse_jsonld_jobs(homepage_html, homepage_url)
         if not jobs:
-            return "no_jobs", [], ";".join(sources)
-        return "ok", jobs, "jsonld-homepage"
+            return result("no_jobs", [], ";".join(sources))
+        if not discovery["career_page_url"]:
+            discovery.update({
+                "career_page_url": homepage_url,
+                "career_page_status": "Validated",
+                "career_page_discovery_method": "homepage_jobposting",
+            })
+        return result("ok", jobs, "jsonld-homepage")
 
-    return "ok", jobs, ";".join(sources) or "generic"
+    return result("ok", jobs, ";".join(sources) or "generic")
+
+
+def process_company(company_row, session=None, enable_search=True):
+    """Backward-compatible three-value company processing API."""
+    details = process_company_details(company_row, session=session, enable_search=enable_search)
+    return details["status"], details["jobs"], details["source"]

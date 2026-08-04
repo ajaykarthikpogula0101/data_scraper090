@@ -12,6 +12,9 @@ from job_scraper.llm_extract import ExtractionValidationError, validate_extracti
 from job_scraper.parsers_jsonld import parse_jsonld_jobs
 from job_scraper.recrawl_closed_check import classify_response, recrawl_csv
 from job_scraper import pipeline
+from job_scraper.ats import find_career_links, validate_career_page
+from job_scraper import websearch
+from bs4 import BeautifulSoup
 
 
 class FakeResponse:
@@ -104,12 +107,37 @@ class DataQualityTests(unittest.TestCase):
         html = '<script type="application/ld+json">{"@type":"JobPosting"}</script>'
         self.assertEqual(classify_response(FakeResponse(text=html), "https://example.test/job/1"), (False, "active"))
 
+    def test_external_recognized_ats_link_is_discovered(self):
+        soup = BeautifulSoup(
+            '<a href="https://jobs.lever.co/example">View current openings</a>'
+            '<a href="https://unrelated.test/jobs">Jobs elsewhere</a>', "html.parser")
+        links = find_career_links(soup, "https://example.com", limit=10)
+        self.assertEqual(links, ["https://jobs.lever.co/example"])
+
+    def test_same_domain_career_page_requires_page_evidence(self):
+        self.assertTrue(validate_career_page(
+            "https://example.com/careers", "<html><h1>Join our team</h1></html>", "https://example.com"))
+        self.assertFalse(validate_career_page(
+            "https://example.com/about", "<html><h1>About us</h1></html>", "https://example.com"))
+
+    def test_career_web_search_rejects_unrelated_results(self):
+        results = ["https://example.com/careers", "https://jobs.lever.co/example",
+                   "https://unrelated.test/jobs", "https://jobs.lever.co/another-company"]
+        with patch.object(websearch, "_search_bing_rss", return_value=results):
+            found = websearch.search_company_career_pages(
+                "Example Ltd", "https://example.com", object(), limit=5)
+        self.assertEqual(found, ["https://example.com/careers", "https://jobs.lever.co/example"])
+
     def test_company_without_jobs_still_gets_output_row(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "jobs.csv")
             companies = [("Example Ltd", "https://example.test", "India")]
+            details = {"status": "no_jobs", "jobs": [], "source": "homepage",
+                       "career_page_url": "https://example.test/careers",
+                       "career_page_status": "Validated",
+                       "career_page_discovery_method": "homepage_link"}
             with patch.object(pipeline, "read_companies", return_value=companies), \
-                    patch.object(pipeline, "process_company", return_value=("no_jobs", [], "homepage")):
+                    patch.object(pipeline, "process_company_details", return_value=details):
                 pipeline.run(input_file="unused.xlsx", output_file=path, workers=1, resume=False)
             with open(path, "r", encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
@@ -118,6 +146,7 @@ class DataQualityTests(unittest.TestCase):
             self.assertEqual(rows[0]["country"], "India")
             self.assertEqual(rows[0]["website"], "https://example.test")
             self.assertEqual(rows[0]["job_status"], "No Jobs Found")
+            self.assertEqual(rows[0]["career_page_url"], "https://example.test/careers")
 
 
 if __name__ == "__main__":
