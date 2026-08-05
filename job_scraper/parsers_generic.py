@@ -4,7 +4,8 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from .fields import clean_text, join_list, parse_date, to_list, empty_job, extract_labeled_fields
+from .fields import (clean_text, join_list, parse_date, to_list, empty_job,
+                     extract_labeled_fields, salary_evidence_from_text)
 from .parsers_jsonld import parse_jsonld_jobs, parse_microdata_jobs
 from .urlutils import url_join
 from .config import MAX_JOB_DETAIL_PAGES, MAX_JOBS_PER_COMPANY
@@ -218,6 +219,17 @@ def _labeled_page_value(soup, labels):
             value = clean_text(value_node.get_text(" ", strip=True), max_len=500)
             if value:
                 return value
+        # Common CMS pattern: <p><b>REGION</b>: Wien</p>. The value is a text
+        # node, not an element sibling, so read the small parent container.
+        parent = node.parent
+        if parent:
+            parent_text = clean_text(parent.get_text(" ", strip=True), max_len=500)
+            if len(parent_text) <= 500:
+                value = re.sub(r"^\s*%s\s*:?\s*" % re.escape(
+                    clean_text(node.get_text(" ", strip=True), max_len=100)),
+                    "", parent_text, flags=re.I).strip()
+                if value and value.lower() != label:
+                    return value
     return ""
 
 
@@ -246,21 +258,25 @@ def _parse_generic_detail(html, url):
     job["job_description"] = str(description)
     job["job_url"] = url
     job["job_status"] = "Active"
-    job["job_location"] = _labeled_page_value(soup, ("location", "work location", "workplace", "arbejdssted"))
-    job["job_category"] = _labeled_page_value(soup, ("category", "department", "team", "function"))
+    job["job_location"] = _labeled_page_value(
+        soup, ("location", "work location", "workplace", "arbejdssted", "region", "standort", "arbeitsort"))
+    job["job_category"] = _labeled_page_value(
+        soup, ("category", "department", "team", "function", "berufsfeld", "bereich", "abteilung"))
     job["employment_type"] = _labeled_page_value(
-        soup, ("employment type", "job type", "work type", "schedule", "arbejdstid"))
+        soup, ("employment type", "job type", "work type", "schedule", "arbejdstid",
+               "anstellungsart", "beschäftigungsart"))
     job["application_deadline"] = parse_date(_labeled_page_value(
         soup, ("application deadline", "closing date", "deadline", "ansøgningsfrist")))
     labeled = extract_labeled_fields(description_text)
     for field in ("employment_type", "education_qualification", "seniority_level"):
         if not job.get(field) and labeled.get(field):
             job[field] = labeled[field]
-    if labeled.get("salary") and re.search(r"\d", labeled["salary"]):
+    salary_text = labeled.get("salary") or salary_evidence_from_text(description_text)
+    if salary_text and re.search(r"\d", salary_text):
         from .fields import salary_breakdown, currency_from_salary
-        display, minimum, maximum = salary_breakdown(labeled["salary"])
+        display, minimum, maximum = salary_breakdown(salary_text)
         job.update({"salary": display, "min_salary": minimum, "max_salary": maximum,
-                    "currency": currency_from_salary(labeled["salary"])})
+                    "currency": currency_from_salary(salary_text)})
     job["source"] = "generic-detail"
     return job
 
@@ -415,4 +431,13 @@ def parse_generic(session, url):
                     "years_of_experience", "salary"):
             if not j.get(key) and labeled.get(key):
                 j[key] = labeled[key]
+        salary_text = j.get("salary") or salary_evidence_from_text(
+            clean_text(BeautifulSoup(j.get("job_description") or "", "html.parser").get_text(" ", strip=True),
+                       max_len=30000))
+        if salary_text:
+            from .fields import salary_breakdown, currency_from_salary
+            display, minimum, maximum = salary_breakdown(salary_text)
+            if display:
+                j.update({"salary": display, "min_salary": minimum, "max_salary": maximum,
+                          "currency": j.get("currency") or currency_from_salary(salary_text)})
     return combined

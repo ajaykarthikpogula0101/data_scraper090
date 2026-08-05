@@ -21,7 +21,7 @@ from job_scraper.parsers_generic import (_extract_listing_jobs, _parse_hrmanager
                                          _parse_inline_jobs)
 from job_scraper.session import _looks_like_javascript_shell
 from job_scraper.fields import empty_job
-from job_scraper.fields import salary_breakdown, experience_year_range
+from job_scraper.fields import salary_breakdown, experience_year_range, salary_evidence_from_text
 from job_scraper.parsers_jsonld import parse_microdata_jobs
 from job_scraper.parsers_ats import (parse_greenhouse, parse_lever, parse_smartrecruiters,
                                      parse_recruitee, parse_breezy, parse_jazzhr,
@@ -275,6 +275,20 @@ class DataQualityTests(unittest.TestCase):
         self.assertEqual(experience_year_range("3-5 years of experience"), ("3", "5"))
         self.assertEqual(experience_year_range("At least 4 years of experience"), ("4", ""))
 
+    def test_german_labeled_fields_and_salary_are_separated(self):
+        html = '''<main><h1>Sales Manager/in</h1>
+        <p><b>REGION</b>: Wien</p><p><b>ANSTELLUNGSART</b>: Unbefristet</p>
+        <p><b>BERUFSFELD</b>: Vertrieb</p>
+        <p>Je nach Qualifikation bieten wir ein Jahresbruttogehalt von 60.000-112.000€.</p>
+        <p>Bitte senden Sie Ihre Bewerbung und Ihren Lebenslauf an jobs@example.test.</p></main>'''
+        job = _parse_generic_detail(html, "https://example.test/jobs/sales")
+        self.assertEqual((job["job_location"], job["employment_type"], job["job_category"]),
+                         ("Wien", "Unbefristet", "Vertrieb"))
+        self.assertEqual((job["min_salary"], job["max_salary"], job["currency"]),
+                         ("60000", "112000", "EUR"))
+        self.assertIn("Jahresbruttogehalt", salary_evidence_from_text(
+            "Je nach Qualifikation bieten wir ein Jahresbruttogehalt von 60.000€."))
+
     def test_hr_manager_uses_reordered_headers(self):
         html = '''<table><thead><tr><th>Location</th><th>Title</th><th>Deadline</th>
         <th>Type</th><th>Category</th><th>Action</th></tr></thead><tbody><tr>
@@ -373,6 +387,30 @@ class DataQualityTests(unittest.TestCase):
             self.assertEqual(rows[0]["website"], "https://example.test")
             self.assertEqual(rows[0]["job_status"], "No Jobs Found")
             self.assertEqual(rows[0]["career_page_url"], "https://example.test/careers")
+
+    def test_multiple_openings_create_separate_rows_with_company_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, "jobs.csv")
+            companies = [("Example Ltd", "https://example.test", "India")]
+            first = empty_job()
+            first.update({"job_title": "Engineer", "job_url": "https://example.test/jobs/1",
+                          "job_status": "Active", "job_description": "Build systems"})
+            second = empty_job()
+            second.update({"job_title": "Analyst", "job_url": "https://example.test/jobs/2",
+                           "job_status": "Active", "job_description": "Analyze systems"})
+            details = {"status": "ok", "jobs": [first, second], "source": "generic",
+                       "career_page_url": "https://example.test/careers",
+                       "career_page_status": "Validated",
+                       "career_page_discovery_method": "homepage_link"}
+            with patch.object(pipeline, "read_companies", return_value=companies), \
+                    patch.object(pipeline, "process_company_details", return_value=details):
+                pipeline.run("unused.xlsx", output, workers=1, resume=False)
+            with open(output, "r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 2)
+            self.assertEqual([row["job_title"] for row in rows], ["Engineer", "Analyst"])
+            self.assertTrue(all(row["company_name"] == "Example Ltd" for row in rows))
+            self.assertTrue(all(row["website"] == "https://example.test" for row in rows))
 
     def test_duplicate_domains_are_processed_once_per_run(self):
         with tempfile.TemporaryDirectory() as directory:

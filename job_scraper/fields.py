@@ -124,7 +124,22 @@ def parse_decimal(value):
     m = re.search(r"-?\d[\d,]*\.?\d*", text.replace("\u00a0", " "))
     if not m:
         return ""
-    num = m.group(0).replace(",", "")
+    num = m.group(0)
+    sign = "-" if num.startswith("-") else ""
+    unsigned = num.lstrip("-")
+    if "," in unsigned and "." in unsigned:
+        if unsigned.rfind(",") > unsigned.rfind("."):
+            unsigned = unsigned.replace(".", "").replace(",", ".")
+        else:
+            unsigned = unsigned.replace(",", "")
+    elif "," in unsigned:
+        parts = unsigned.split(",")
+        unsigned = "".join(parts) if all(len(part) == 3 for part in parts[1:]) else unsigned.replace(",", ".")
+    elif "." in unsigned:
+        parts = unsigned.split(".")
+        if all(len(part) == 3 for part in parts[1:]):
+            unsigned = "".join(parts)
+    num = sign + unsigned
     try:
         f = float(num)
         if f == int(f):
@@ -135,7 +150,7 @@ def parse_decimal(value):
 
 
 def currency_from_salary(value):
-    text = clean_text(value, max_len=50)
+    text = clean_text(value, max_len=500)
     for cur in ["USD", "EUR", "GBP", "INR", "AUD", "CAD", "CHF", "JPY", "CNY",
                 "SEK", "NOK", "DKK", "PLN", "BRL", "HKD", "SGD", "NZD", "ZAR",
                 "CZK", "HUF", "MXN"]:
@@ -177,7 +192,8 @@ _LABELED_RE = {
         re.IGNORECASE,
     ),
     "salary": re.compile(
-        r"(?:salary|compensation|pay\s*range|annual\s*salary|pay)\s*[:\-]\s*([^|\n\r]+?)"
+        r"\b(?:salary|compensation|pay\s*range|annual\s*salary|pay|gehalt|vergütung)\b"
+        r"\s*[:\-]\s*([^|\n\r]+?)"
         r"(?=\s*(?:requisition|experience|education|job\s*id|#|$))",
         re.IGNORECASE,
     ),
@@ -214,12 +230,43 @@ def extract_labeled_fields(text):
     return out
 
 
+def salary_evidence_from_text(text):
+    """Return an explicit salary sentence/line containing numeric evidence."""
+    if not text:
+        return ""
+    keyword = re.compile(
+        r"\b(?:salary|compensation|pay range|annual pay|gehalt|vergütung|"
+        r"brutto(?:jahres|monats)?gehalt|jahresbruttogehalt|monatsbruttogehalt|"
+        r"jahresbrutto|monatsbrutto|entlohnung)\b",
+        re.I,
+    )
+    numeric = re.compile(
+        r"(?:[$€£₹¥]\s*\d|\d[\d.,]*\s*(?:[$€£₹¥]|USD|EUR|GBP|INR|AUD|CAD|CHF))",
+        re.I,
+    )
+    source = str(text)
+    for match in keyword.finditer(source):
+        # Start at the salary keyword so flattened bullet lists cannot pollute
+        # the salary column with hundreds of characters preceding the amount.
+        value = clean_text(source[match.start():match.start() + 350], max_len=350)
+        amount = numeric.search(value)
+        if amount:
+            end = len(value)
+            sentence_end = re.search(r"[.!?](?:\s|$)", value[amount.end():])
+            if sentence_end:
+                end = amount.end() + sentence_end.end()
+            return value[:end].strip()
+    return ""
+
+
 def salary_breakdown(salary_text):
     """Split a salary text into display, min, max."""
     if not salary_text:
         return "", "", ""
     text = clean_text(salary_text, max_len=200)
-    numbers = [parse_decimal(x) for x in re.findall(r"-?\d[\d,]*\.?\d*\s*-\s*-?\d[\d,]*\.?\d*|[-–]?\d[\d,]*\.?\d*", text.replace("\u2013", "-").replace("\u2014", "-"))]
+    # Extract each endpoint separately; parsing the whole "60.000-112.000"
+    # range as one token silently discarded the maximum.
+    numbers = [parse_decimal(x) for x in re.findall(r"\d[\d,.]*", text)]
     nums = [n for n in numbers if n]
     if nums and all(float(n) <= 0 for n in nums):
         return "", "", ""

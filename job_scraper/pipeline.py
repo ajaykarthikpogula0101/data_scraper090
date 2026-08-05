@@ -16,7 +16,7 @@ from .config import (
 )
 from .company import process_company_details
 from .session import ScrapeSession
-from .fields import now_iso, extract_labeled_fields, experience_year_range
+from .fields import now_iso, extract_labeled_fields, experience_year_range, clean_text
 from .clean_html import html_to_plain_text
 from .detect_language import detect_language
 from .urlutils import normalize_website, hostname
@@ -205,6 +205,7 @@ def run(
         for j in jobs:
             raw_description = j.get("job_description", "")
             clean_description = html_to_plain_text(raw_description)
+            csv_description = clean_text(clean_description, max_len=30000)
             labeled = extract_labeled_fields(clean_description)
             experience_text = j.get("years_of_experience", "") or labeled.get("years_of_experience", "")
             derived_experience_min, derived_experience_max = experience_year_range(experience_text)
@@ -238,8 +239,10 @@ def run(
                 "employment_type": j.get("employment_type", ""),
                 "skills": j.get("skills", ""),
                 "description_language": detect_language(clean_description),
-                "job_description": raw_description,
-                "job_description_clean": clean_description,
+                # Keep each CSV record on one physical line. Raw multiline HTML
+                # made correct quoted CSV look column-shifted in text viewers.
+                "job_description": csv_description,
+                "job_description_clean": csv_description,
                 "job_url": j.get("job_url", ""),
                 "salary_disclosed": bool(j.get("salary") or j.get("min_salary") or j.get("max_salary")),
                 "salary": j.get("salary", ""),
