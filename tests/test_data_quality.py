@@ -17,7 +17,8 @@ from job_scraper.company import process_company_details
 from job_scraper.ats import find_career_links, validate_career_page
 from job_scraper import websearch
 from job_scraper.parsers_generic import (_extract_listing_jobs, _parse_hrmanager_detail,
-                                         _parse_generic_detail, _extract_pagination_links)
+                                         _parse_generic_detail, _extract_pagination_links,
+                                         _parse_inline_jobs)
 from job_scraper.session import _looks_like_javascript_shell
 from job_scraper.fields import empty_job
 from job_scraper.fields import salary_breakdown, experience_year_range
@@ -243,6 +244,22 @@ class DataQualityTests(unittest.TestCase):
         self.assertEqual(job["application_deadline"], "2026-08-31")
         self.assertEqual(job["salary"], "")
         self.assertIn("pipeline ownership", job["job_description"])
+
+    def test_inline_career_page_vacancy_is_extracted(self):
+        html = '''<main><h1>Karriere bei Beispiel</h1><section>
+        <h2>Objektleiter Gebäudereinigung / Gebäudemanagement (m/w/d)</h2>
+        <h3>Ihre Aufgaben</h3><p>Selbstständige Leitung, Organisation und Betreuung
+        infrastruktureller Objekte sowie Führung der Mitarbeiter vor Ort.</p>
+        <h3>Ihr Profil</h3><p>Mehrjährige Erfahrung und Führerschein Klasse B.</p>
+        <h3>Interessiert?</h3><p>Wir freuen uns auf Ihre Bewerbungsunterlagen an
+        jobs@example.test.</p></section><h2>Weitere Informationen</h2></main>'''
+        jobs = _parse_inline_jobs(html, "https://example.test/stellenangebote/")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["job_title"],
+                         "Objektleiter Gebäudereinigung / Gebäudemanagement (m/w/d)")
+        self.assertEqual(jobs[0]["job_status"], "Active")
+        self.assertEqual(jobs[0]["source"], "inline-career-page")
+        self.assertIn("Mehrjährige Erfahrung", jobs[0]["job_description"])
 
     def test_same_domain_career_page_requires_page_evidence(self):
         self.assertTrue(validate_career_page(

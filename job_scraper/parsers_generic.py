@@ -26,6 +26,18 @@ LISTING_TEXT_RE = re.compile(
     re.I,
 )
 
+INLINE_JOB_TITLE_RE = re.compile(
+    r"\((?:m|w|d|f|x)(?:\s*[/|,\-]\s*(?:m|w|d|f|x)){1,}\)|"
+    r"\b(?:vacancy|open position|we are hiring|wir suchen)\s*[:\-]",
+    re.I,
+)
+APPLICATION_TEXT_RE = re.compile(
+    r"\b(?:apply|application|submit your cv|send your cv|ansøg|bewerb(?:en|ung|ungsunterlagen)|"
+    r"interessiert|lebenslauf|curriculum vitae)\b|"
+    r"\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b",
+    re.I,
+)
+
 
 def _extract_listing_page_links(html, base_url, limit=8):
     soup = BeautifulSoup(html or "", "html.parser")
@@ -226,7 +238,7 @@ def _parse_generic_detail(html, url):
         return None
     description_text = clean_text(description.get_text(" ", strip=True), max_len=30000)
     page_text = clean_text(soup.get_text(" ", strip=True), max_len=50000)
-    application_signal = re.search(r"\b(apply|application|submit your cv|send your cv|ansøg|bewerben)\b", page_text, re.I)
+    application_signal = APPLICATION_TEXT_RE.search(page_text)
     if len(description_text) < 100 or not application_signal:
         return None
     job = empty_job()
@@ -251,6 +263,51 @@ def _parse_generic_detail(html, url):
                     "currency": currency_from_salary(labeled["salary"])})
     job["source"] = "generic-detail"
     return job
+
+
+def _parse_inline_jobs(html, url):
+    """Extract vacancies written directly on a careers page."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    jobs = []
+    seen = set()
+    for heading in soup.find_all(["h1", "h2", "h3", "h4"]):
+        title = clean_text(heading.get_text(" ", strip=True), max_len=500)
+        if not title or not INLINE_JOB_TITLE_RE.search(title) or title.lower() in seen:
+            continue
+        container = heading
+        selected = None
+        for _ in range(7):
+            container = container.parent
+            if not container:
+                break
+            text = clean_text(container.get_text(" ", strip=True), max_len=30000)
+            if 200 <= len(text) <= 30000 and APPLICATION_TEXT_RE.search(text):
+                selected = container
+                break
+        if selected is None:
+            continue
+        description_text = clean_text(selected.get_text(" ", strip=True), max_len=30000)
+        job = empty_job()
+        job["job_title"] = title
+        job["job_description"] = str(selected)
+        job["job_url"] = url
+        job["job_status"] = "Active"
+        job["job_location"] = _labeled_page_value(
+            selected, ("location", "work location", "workplace", "arbeitsort", "standort"))
+        job["employment_type"] = _labeled_page_value(
+            selected, ("employment type", "job type", "work type", "schedule", "beschäftigungsart"))
+        job["application_deadline"] = parse_date(_labeled_page_value(
+            selected, ("application deadline", "closing date", "deadline", "bewerbungsfrist")))
+        labeled = extract_labeled_fields(description_text)
+        for field in ("employment_type", "education_qualification", "seniority_level"):
+            if not job.get(field) and labeled.get(field):
+                job[field] = labeled[field]
+        job["source"] = "inline-career-page"
+        job["extraction_confidence"] = "High"
+        job["extraction_evidence"] = "explicit job-title heading and application instructions"
+        jobs.append(job)
+        seen.add(title.lower())
+    return jobs
 
 EXCLUDE = re.compile(
     r"(javascript:|mailto:|tel:|#|\.(jpg|jpeg|png|gif|svg|css|js|pdf|zip|mp4)"
@@ -307,6 +364,8 @@ def parse_generic(session, url):
         jobs = parse_microdata_jobs(html, url)
     if not jobs:
         jobs = _extract_listing_jobs(html, url)
+    if not jobs:
+        jobs = _parse_inline_jobs(html, url)
     job_links = _extract_job_links(html, url)
     listing_jobs = []
     listing_queue = _extract_listing_page_links(html, url)
@@ -326,6 +385,8 @@ def parse_generic(session, url):
             parsed_listing = parse_microdata_jobs(listing_html, listing_url)
         if not parsed_listing:
             parsed_listing = _extract_listing_jobs(listing_html, listing_url)
+        if not parsed_listing:
+            parsed_listing = _parse_inline_jobs(listing_html, listing_url)
         listing_jobs.extend(parsed_listing)
         job_links.extend(_extract_job_links(listing_html, listing_url))
         listing_queue.extend(_extract_pagination_links(listing_html, listing_url))
