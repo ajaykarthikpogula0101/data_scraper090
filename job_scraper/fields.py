@@ -208,7 +208,7 @@ def extract_labeled_fields(text):
             continue
         if key == "years_of_experience" and not re.search(r"\d", val):
             continue
-        if key == "salary" and not re.search(r"\d|€|$|£|₹|¥", val):
+        if key == "salary" and not re.search(r"\d|€|\$|£|₹|¥", val):
             continue
         out[key] = val
     return out
@@ -221,6 +221,8 @@ def salary_breakdown(salary_text):
     text = clean_text(salary_text, max_len=200)
     numbers = [parse_decimal(x) for x in re.findall(r"-?\d[\d,]*\.?\d*\s*-\s*-?\d[\d,]*\.?\d*|[-–]?\d[\d,]*\.?\d*", text.replace("\u2013", "-").replace("\u2014", "-"))]
     nums = [n for n in numbers if n]
+    if nums and all(float(n) <= 0 for n in nums):
+        return "", "", ""
     mn = nums[0] if len(nums) >= 1 else ""
     mx = nums[1] if len(nums) >= 2 else ""
     if mn and mx and mn != mx:
@@ -228,6 +230,28 @@ def salary_breakdown(salary_text):
     if mn:
         return mn, mn, ""
     return text, "", ""
+
+
+def experience_year_range(text):
+    """Extract an explicitly stated year range without inferring experience."""
+    value = clean_text(text, max_len=500)
+    if not value:
+        return "", ""
+    match = re.search(r"\b(\d{1,2})\s*(?:-|–|—|to)\s*(\d{1,2})\s*(?:\+\s*)?years?\b",
+                      value, re.I)
+    if match:
+        minimum, maximum = int(match.group(1)), int(match.group(2))
+        if 0 <= minimum <= maximum <= 80:
+            return str(minimum), str(maximum)
+    match = re.search(
+        r"(?:minimum(?: of)?|at least|more than|over)?\s*(\d{1,2})\s*\+?\s*years?"
+        r"(?:\s+of)?\s+experience|\b(\d{1,2})\s*\+\s*years?\b",
+        value, re.I)
+    if match:
+        years = int(match.group(1) or match.group(2))
+        if 0 <= years <= 80:
+            return str(years), ""
+    return "", ""
 
 
 def empty_job():

@@ -5,6 +5,7 @@ import csv
 import os
 import re
 import tempfile
+from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 
 from bs4 import BeautifulSoup
@@ -41,11 +42,24 @@ def classify_response(response, original_url):
     closed_copy = bool(CLOSED_RE.search(BeautifulSoup(text, "html.parser").get_text(" ", strip=True)))
     if closed_copy:
         return True, "closed_message"
-    if redirected and not _has_jobposting_jsonld(text):
-        return True, "redirected_without_jobposting"
-    if not _has_jobposting_jsonld(text):
-        return True, "jobposting_jsonld_missing"
-    return False, "active"
+    if redirected and _looks_like_generic_landing(final_url, original_url):
+        return True, "redirected_to_listing_root"
+    # Missing JSON-LD is inconclusive: many active ATS detail pages never
+    # publish JobPosting markup.
+    return (False, "active") if _has_jobposting_jsonld(text) else (False, "active_or_inconclusive")
+
+
+def _looks_like_generic_landing(final_url, original_url):
+    final = urlparse(final_url)
+    original = urlparse(original_url)
+    final_path = final.path.lower().rstrip("/")
+    original_path = original.path.lower().rstrip("/")
+    roots = {"", "/career", "/careers", "/jobs", "/vacancies", "/open-positions",
+             "/opportunities", "/join-us", "/work-with-us"}
+    original_specific = (original_path not in roots and
+                         (len([part for part in original_path.split("/") if part]) >= 2 or
+                          bool(original.query)))
+    return original_specific and final_path in roots
 
 
 def _due(last_checked, interval_days, now):

@@ -1,9 +1,23 @@
 import threading
+import re
 import requests
+from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .config import DEFAULT_TIMEOUT, REQUEST_HEADERS
+
+
+def _looks_like_javascript_shell(html_text):
+    if not html_text:
+        return True
+    soup = BeautifulSoup(html_text, "html.parser")
+    visible = soup.get_text(" ", strip=True)
+    anchors = soup.find_all("a", href=True, limit=2)
+    scripts = soup.find_all("script", limit=10)
+    app_root = soup.find(id=re.compile(r"^(app|root|__next)$", re.I))
+    return bool((len(visible) < 200 and scripts) or
+                (app_root is not None and len(visible) < 500 and not anchors))
 
 
 class ScrapeSession:
@@ -59,6 +73,11 @@ class ScrapeSession:
         ctype = r.headers.get("Content-Type", "").lower()
         if "json" in ctype:
             return r.text
+        if "html" in ctype and _looks_like_javascript_shell(r.text):
+            from .browser_fetch import fetch_rendered_html
+            rendered = fetch_rendered_html(r.url or url)
+            if rendered:
+                return rendered
         return r.text
 
     def fetch_json(self, url, timeout=None, **kwargs):

@@ -13,11 +13,20 @@ from job_scraper.parsers_jsonld import parse_jsonld_jobs
 from job_scraper.recrawl_closed_check import classify_response, recrawl_csv
 from job_scraper import pipeline
 from job_scraper.company import _candidate_ats
+from job_scraper.company import process_company_details
 from job_scraper.ats import find_career_links, validate_career_page
 from job_scraper import websearch
 from job_scraper.parsers_generic import (_extract_listing_jobs, _parse_hrmanager_detail,
-                                         _parse_generic_detail)
+                                         _parse_generic_detail, _extract_pagination_links)
+from job_scraper.session import _looks_like_javascript_shell
 from job_scraper.fields import empty_job
+from job_scraper.fields import salary_breakdown, experience_year_range
+from job_scraper.parsers_jsonld import parse_microdata_jobs
+from job_scraper.parsers_ats import (parse_greenhouse, parse_lever, parse_smartrecruiters,
+                                     parse_recruitee, parse_breezy, parse_jazzhr,
+                                     parse_workday, _personio_item, _personio_xml_item)
+from job_scraper.llm_extract import process_csv
+import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 
 
@@ -26,6 +35,7 @@ class FakeResponse:
         self.status_code = status_code
         self.text = text
         self.url = url
+        self.headers = {"Content-Type": "text/html"}
 
 
 class FakeSession:
@@ -36,12 +46,65 @@ class FakeSession:
         return self.response
 
 
+class ApiSession:
+    def __init__(self, json_values=None, post_value=None):
+        self.json_values = list(json_values or [])
+        self.post_value = post_value
+
+    def fetch_json(self, *args, **kwargs):
+        return self.json_values.pop(0) if self.json_values else None
+
+    def post_json(self, *args, **kwargs):
+        return self.post_value
+
+
 class DataQualityTests(unittest.TestCase):
     def test_jsonld_url_falls_back_to_fetched_page(self):
         payload = {"@context": "https://schema.org", "@type": "JobPosting", "title": "Engineer"}
         html = '<script type="application/ld+json">%s</script>' % json.dumps(payload)
         jobs = parse_jsonld_jobs(html, base_url="https://example.test/jobs/123")
         self.assertEqual(jobs[0]["job_url"], "https://example.test/jobs/123")
+
+    def test_jsonld_and_microdata_locations_use_job_location(self):
+        payload = {"@context": "https://schema.org", "@type": "JobPosting", "title": "Engineer",
+                   "jobLocation": {"address": {"addressLocality": "Pune",
+                                                "addressRegion": "MH", "addressCountry": "India"}}}
+        html = '<script type="application/ld+json">%s</script>' % json.dumps(payload)
+        self.assertEqual(parse_jsonld_jobs(html)[0]["job_location"], "Pune, MH, India")
+        remote = dict(payload, jobLocation=None, jobLocationType="TELECOMMUTE")
+        html = '<script type="application/ld+json">%s</script>' % json.dumps(remote)
+        self.assertEqual(parse_jsonld_jobs(html)[0]["job_location"], "Remote")
+        micro = '''<div itemscope itemtype="https://schema.org/JobPosting">
+        <meta itemprop="title" content="Engineer"><div itemprop="jobLocation" itemscope
+        itemtype="https://schema.org/Place"><span itemprop="addressLocality">Berlin</span>
+        <span itemprop="addressCountry">Germany</span></div></div>'''
+        self.assertEqual(parse_microdata_jobs(micro)[0]["job_location"], "Berlin, Germany")
+
+    def test_major_ats_parsers_preserve_locations(self):
+        greenhouse = parse_greenhouse(ApiSession([{"jobs": [{"title": "A", "location": {"name": "Paris"}}]}]),
+                                      {"board": "x"})[0]
+        lever = parse_lever(ApiSession([[{"text": "A", "categories": {"location": "London"}}]]),
+                            {"board": "x"})[0]
+        smart = parse_smartrecruiters(ApiSession([{"content": [{"id": "abc", "name": "A",
+            "location": {"fullLocation": "Madrid"}}], "totalFound": 1}]), {"board": "x"})[0]
+        recruitee = parse_recruitee(ApiSession([{"offers": [{"title": "A", "location": "Rome"}]}]),
+                                    {"board": "x"})[0]
+        breezy = parse_breezy(ApiSession([[{"title": "A", "location": {"name": "Oslo"}}]]),
+                              {"board": "x"})[0]
+        jazz = parse_jazzhr(ApiSession([{"jobs": [{"title": "A", "city": "Boston"}]}]),
+                            {"board": "x"})[0]
+        workday = parse_workday(ApiSession(post_value={"jobPostings": [{"title": "A",
+            "locationsText": "Toronto"}], "total": 1}),
+            {"base_url": "https://x.example", "tenant": "x", "domain": "x"})[0]
+        personio_json = _personio_item({"name": "A", "id": 1, "location": "Vienna"}, "x",
+                                      "https://x.jobs.personio.de")
+        personio_xml = _personio_xml_item(ET.fromstring(
+            "<position><id>1</id><name>A</name><office>Munich</office></position>"), "x", "de")
+        self.assertEqual([job["job_location"] for job in
+                          (greenhouse, lever, smart, recruitee, breezy, jazz, workday,
+                           personio_json, personio_xml)],
+                         ["Paris", "London", "Madrid", "Rome", "Oslo", "Boston", "Toronto",
+                          "Vienna", "Munich"])
 
     def test_jsonld_rejects_placeholder_fields(self):
         payload = {
@@ -110,6 +173,11 @@ class DataQualityTests(unittest.TestCase):
     def test_active_jsonld_remains_active(self):
         html = '<script type="application/ld+json">{"@type":"JobPosting"}</script>'
         self.assertEqual(classify_response(FakeResponse(text=html), "https://example.test/job/1"), (False, "active"))
+
+    def test_active_page_without_jsonld_is_inconclusive_not_closed(self):
+        response = FakeResponse(text="<html><h1>Engineer</h1><p>Apply now for this active role.</p></html>")
+        self.assertEqual(classify_response(response, "https://example.test/job/1"),
+                         (False, "active_or_inconclusive"))
 
     def test_external_recognized_ats_link_is_discovered(self):
         soup = BeautifulSoup(
@@ -181,6 +249,26 @@ class DataQualityTests(unittest.TestCase):
             "https://example.com/careers", "<html><h1>Join our team</h1></html>", "https://example.com"))
         self.assertFalse(validate_career_page(
             "https://example.com/about", "<html><h1>About us</h1></html>", "https://example.com"))
+        soft_404 = '<html><h1>Page not found</h1><footer><a href="/careers">Careers</a></footer></html>'
+        self.assertFalse(validate_career_page(
+            "https://example.com/careers-at", soft_404, "https://example.com"))
+
+    def test_zero_salary_and_explicit_experience_range(self):
+        self.assertEqual(salary_breakdown("Salary: $0 confidential"), ("", "", ""))
+        self.assertEqual(experience_year_range("3-5 years of experience"), ("3", "5"))
+        self.assertEqual(experience_year_range("At least 4 years of experience"), ("4", ""))
+
+    def test_hr_manager_uses_reordered_headers(self):
+        html = '''<table><thead><tr><th>Location</th><th>Title</th><th>Deadline</th>
+        <th>Type</th><th>Category</th><th>Action</th></tr></thead><tbody><tr>
+        <td>Denmark</td><td>Buyer</td><td>August 31, 2026</td><td>Full-time</td><td>Purchase</td>
+        <td><a href="https://candidate.hr-manager.net/ApplicationInit.aspx?ProjectId=7">Apply</a></td>
+        </tr></tbody></table>'''
+        job = _extract_listing_jobs(html, "https://example.test/career")[0]
+        self.assertEqual((job["job_title"], job["job_location"], job["employment_type"],
+                          job["job_category"], job["application_deadline"]),
+                         ("Buyer", "Denmark", "Full-time", "Purchase", "2026-08-31"))
+        self.assertEqual(job["extraction_confidence"], "High")
 
     def test_career_web_search_rejects_unrelated_results(self):
         results = ["https://example.com/careers", "https://jobs.lever.co/example",
@@ -189,6 +277,34 @@ class DataQualityTests(unittest.TestCase):
             found = websearch.search_company_career_pages(
                 "Example Ltd", "https://example.com", object(), limit=5)
         self.assertEqual(found, ["https://example.com/careers", "https://jobs.lever.co/example"])
+
+    def test_regional_no_jobs_does_not_override_official_ats(self):
+        homepage = '''<a href="/en/careers/jobs/thailand/">Thailand job openings</a>
+        <a href="https://example.taleo.net/careersection/2/jobsearch.ftl">All jobs</a>
+        <a href="/en/careers/">Careers</a>'''
+        responses = {
+            "https://example.test": FakeResponse(text=homepage, url="https://example.test"),
+            "https://example.test/en/careers": FakeResponse(
+                text="<h1>Careers</h1><a href='https://example.taleo.net/careersection/2/jobsearch.ftl'>Jobs</a>",
+                url="https://example.test/en/careers"),
+            "https://example.test/en/careers/jobs/thailand": FakeResponse(
+                text="<h1>Careers</h1><p>There are currently no open positions.</p>",
+                url="https://example.test/en/careers/jobs/thailand"),
+            "https://example.taleo.net/careersection/2/jobsearch.ftl": FakeResponse(
+                text="<h1>Job Search</h1>", url="https://example.taleo.net/careersection/2/jobsearch.ftl"),
+        }
+        class MappingSession:
+            def fetch(self, url, **kwargs):
+                return responses.get(url)
+            def fetch_text(self, url, **kwargs):
+                response = responses.get(url)
+                return response.text if response else None
+        with patch("job_scraper.company.common_career_urls", return_value=[]), \
+                patch("job_scraper.company.parse_generic", return_value=[]):
+            result = process_company_details(("Example", "https://example.test", ""),
+                                             session=MappingSession(), enable_search=False)
+        self.assertEqual(result["career_page_url"], "https://example.test/en/careers")
+        self.assertEqual(result["status"], "unsupported")
 
     def test_company_without_jobs_still_gets_output_row(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -209,6 +325,55 @@ class DataQualityTests(unittest.TestCase):
             self.assertEqual(rows[0]["website"], "https://example.test")
             self.assertEqual(rows[0]["job_status"], "No Jobs Found")
             self.assertEqual(rows[0]["career_page_url"], "https://example.test/careers")
+
+    def test_duplicate_domains_are_processed_once_per_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = os.path.join(directory, "jobs.csv")
+            companies = [("Example One", "https://example.test", "India"),
+                         ("Example Two", "https://example.test/", "India")]
+            details = {"status": "no_jobs", "jobs": [], "source": "homepage",
+                       "career_page_url": "https://example.test/careers",
+                       "career_page_status": "Validated",
+                       "career_page_discovery_method": "homepage_link"}
+            with patch.object(pipeline, "read_companies", return_value=companies), \
+                    patch.object(pipeline, "process_company_details", return_value=details) as mocked:
+                stats = pipeline.run("unused.xlsx", output, workers=2, resume=False)
+            self.assertEqual(mocked.call_count, 1)
+            self.assertEqual(stats["processed"], 2)
+            with open(output, "r", encoding="utf-8-sig", newline="") as handle:
+                self.assertEqual(len(list(csv.DictReader(handle))), 2)
+
+    def test_spa_shell_and_pagination_detection(self):
+        shell = '<html><body><div id="root"></div><script src="/app.js"></script></body></html>'
+        self.assertTrue(_looks_like_javascript_shell(shell))
+        html = '<main><a rel="next" href="/careers?page=2">Next</a></main>'
+        self.assertEqual(_extract_pagination_links(html, "https://example.test/careers"),
+                         ["https://example.test/careers?page=2"])
+
+    def test_llm_sidecar_prevents_duplicate_calls_on_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = os.path.join(directory, "input.csv")
+            output = os.path.join(directory, "output.csv")
+            with open(source, "w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["company_name", "job_title", "job_url",
+                                                            "job_description_clean"])
+                writer.writeheader()
+                writer.writerow({"company_name": "Example", "job_title": "Engineer",
+                                 "job_url": "https://example.test/job/1",
+                                 "job_description_clean": "3 years of Python experience"})
+            result = {"years_of_experience_min": 3, "years_of_experience_max": "",
+                      "seniority_level": "Mid", "education_stream": "", "education_type": "",
+                      "education_qualification": "", "skills": "Python", "salary_disclosed": False}
+            calls = []
+            def fake_request(*args, **kwargs):
+                calls.append(args)
+                return result
+            process_csv(source, output_path=output, api_key="test", request_fn=fake_request)
+            process_csv(source, output_path=output, api_key="test", request_fn=fake_request)
+            self.assertEqual(len(calls), 1)
+            with open(output, "r", encoding="utf-8-sig", newline="") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual((row["years_of_experience_min"], row["skills"]), ("3", "Python"))
 
 
 if __name__ == "__main__":

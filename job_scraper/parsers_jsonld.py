@@ -192,6 +192,29 @@ def _extract_skills(entry):
     return join_list(sorted(skill for skill in skills if len(skill) <= 300))
 
 
+def _location_from_jobposting(location):
+    """Return a display location from schema.org JobPosting.jobLocation."""
+    if isinstance(location, list):
+        return "; ".join(filter(None, (_location_from_jobposting(item) for item in location)))
+    if not isinstance(location, dict):
+        return clean_text(location)
+    if location.get("@type") == "VirtualLocation":
+        return clean_text(location.get("name")) or "Remote"
+    address = location.get("address")
+    if isinstance(address, dict):
+        parts = []
+        for key in ("addressLocality", "addressRegion", "postalCode", "addressCountry"):
+            value = address.get(key)
+            if isinstance(value, dict):
+                value = value.get("name") or value.get("@value")
+            value = clean_text(value)
+            if value and value not in parts:
+                parts.append(value)
+        if parts:
+            return ", ".join(parts)
+    return clean_text(location.get("name"))
+
+
 def parse_jsonld_jobs(html_text, base_url=""):
     """Parse all JobPosting entries found in a page's JSON-LD."""
     jobs = []
@@ -213,6 +236,10 @@ def parse_jsonld_jobs(html_text, base_url=""):
             job["employment_type"] = clean_text(emp)
             desc = _text(obj.get("description"))
             job["job_description"] = desc
+            job["job_location"] = _location_from_jobposting(obj.get("jobLocation"))
+            if (not job["job_location"] and
+                    clean_text(obj.get("jobLocationType")).upper() == "TELECOMMUTE"):
+                job["job_location"] = "Remote"
             job["job_status"] = "Active"
             # salary
             disp, mn, mx, cur = _extract_min_max(obj.get("baseSalary"))
@@ -271,9 +298,12 @@ def _scope_props(root):
             if el is not root and el.find_parent(attrs={"itemscope": True}) is not root:
                 continue
             itype = (el.get("itemtype") or "").lower()
+            itemprop = el.get("itemprop")
+            if isinstance(itemprop, list):
+                itemprop = itemprop[0] if itemprop else ""
             for p in ("baseSalary", "jobLocation", "educationRequirements",
                       "experienceRequirements", "hiringOrganization", "address"):
-                if ("schema.org/" + p).lower() in itype:
+                if itemprop == p or ("schema.org/" + p).lower() in itype:
                     nested[p] = el
             continue
         if not el.has_attr("itemprop"):
@@ -317,7 +347,7 @@ def _microdata_job(scope):
             if lp.get(k):
                 parts.append(lp[k][0])
         if parts:
-            job["location"] = ", ".join(x for x in parts if x)
+            job["job_location"] = ", ".join(x for x in parts if x)
     ho = nested.get("hiringOrganization")
     if ho is not None:
         hp, _ = _scope_props(ho)

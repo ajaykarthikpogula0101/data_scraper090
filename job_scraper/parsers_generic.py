@@ -44,6 +44,21 @@ def _extract_listing_page_links(html, base_url, limit=8):
     return links[:limit]
 
 
+def _extract_pagination_links(html, base_url, limit=5):
+    soup = BeautifulSoup(html or "", "html.parser")
+    links = []
+    for anchor in soup.find_all("a", href=True):
+        text = clean_text(anchor.get_text(" ", strip=True), max_len=80)
+        rel = " ".join(anchor.get("rel") or [])
+        if not ("next" in rel.lower() or re.search(
+                r"^(next|next page|older|more jobs|næste|weiter|suivant|siguiente)\b", text, re.I)):
+            continue
+        full = url_join(base_url, anchor["href"])
+        if full and full not in links:
+            links.append(full)
+    return links[:limit]
+
+
 def _extract_listing_jobs(html, base_url):
     """Create minimal rows for explicit ATS job links on a listing page."""
     soup = BeautifulSoup(html or "", "html.parser")
@@ -56,13 +71,40 @@ def _extract_listing_jobs(html, base_url):
         row = anchor.find_parent("tr")
         cells = [clean_text(cell.get_text(" ", strip=True), max_len=500)
                  for cell in row.find_all("td", recursive=False)] if row else []
-        if len(cells) >= 5:
+        table = row.find_parent("table") if row else None
+        headers = [clean_text(cell.get_text(" ", strip=True), max_len=100).lower()
+                   for cell in table.find_all("th")] if table else []
+        aliases = {
+            "title": ("title", "job title", "position", "stilling", "titel"),
+            "category": ("category", "department", "function", "kategori", "tjänst"),
+            "employment_type": ("type", "employment type", "work type", "arbejdstid"),
+            "location": ("location", "workplace", "arbejdssted", "sted"),
+            "deadline": ("deadline", "application deadline", "closing date", "ansøgningsfrist"),
+        }
+        indexes = {}
+        for field, names in aliases.items():
+            for index, header in enumerate(headers):
+                if header in names:
+                    indexes[field] = index
+                    break
+        if cells and "title" in indexes:
+            value = lambda field: (cells[indexes[field]]
+                                   if field in indexes and indexes[field] < len(cells) else "")
+            title = value("title")
+            category = value("category")
+            employment_type = value("employment_type")
+            location = value("location")
+            deadline = value("deadline")
+            mapping_confidence = "High"
+        elif len(cells) >= 5:
             title, category, employment_type, location, deadline = cells[:5]
+            mapping_confidence = "Low"
         else:
             title = clean_text(anchor.get_text(" ", strip=True), max_len=500)
             title = re.sub(r"^Ansøgningsfrist:\s*\d{1,2}\.\s*[A-Za-zæøåÆØÅ]+\.\s*\d{4}\s*", "", title,
                            flags=re.I)
             category = employment_type = location = deadline = ""
+            mapping_confidence = "Low"
         if not title:
             continue
         job = empty_job()
@@ -74,6 +116,8 @@ def _extract_listing_jobs(html, base_url):
         job["job_url"] = full
         job["job_status"] = "Active"
         job["source"] = "hrmanager-listing"
+        job["extraction_confidence"] = mapping_confidence
+        job["extraction_evidence"] = "header-mapped listing" if mapping_confidence == "High" else "positional listing"
         jobs.append(job)
         seen.add(full)
     return jobs
@@ -265,9 +309,15 @@ def parse_generic(session, url):
         jobs = _extract_listing_jobs(html, url)
     job_links = _extract_job_links(html, url)
     listing_jobs = []
-    for listing_url in _extract_listing_page_links(html, url):
+    listing_queue = _extract_listing_page_links(html, url)
+    listing_seen = set()
+    while listing_queue and len(listing_seen) < 10:
+        listing_url = listing_queue.pop(0)
         if listing_url.rstrip("/") == url.rstrip("/"):
             continue
+        if listing_url in listing_seen:
+            continue
+        listing_seen.add(listing_url)
         listing_html = session.fetch_text(listing_url, timeout=35)
         if not listing_html:
             continue
@@ -278,6 +328,7 @@ def parse_generic(session, url):
             parsed_listing = _extract_listing_jobs(listing_html, listing_url)
         listing_jobs.extend(parsed_listing)
         job_links.extend(_extract_job_links(listing_html, listing_url))
+        listing_queue.extend(_extract_pagination_links(listing_html, listing_url))
     job_links = list(dict.fromkeys(job_links))[:MAX_JOB_DETAIL_PAGES]
     detail_jobs = []
     for link in job_links[:MAX_JOB_DETAIL_PAGES]:

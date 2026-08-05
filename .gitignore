@@ -11,9 +11,15 @@ COMPANYWEB29th_July.xlsx
 venv/
 .env
 *.checkpoint
+*.llm_results.jsonl
 extraction_errors.csv
 company_jobs_output.csv
 sample_quality_check.csv
 sample_quality_check_v2.csv
+.browser_cache/
+career_discovery_output*.csv
+claude_data_scraper_source.zip
+intelligent_job_output*.csv
+career_jobs_corrected*.csv
 .idea/
 .vscode/

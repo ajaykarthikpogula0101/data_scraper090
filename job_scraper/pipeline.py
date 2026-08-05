@@ -2,6 +2,7 @@ import csv
 import logging
 import os
 import threading
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import openpyxl
@@ -15,11 +16,14 @@ from .config import (
 )
 from .company import process_company_details
 from .session import ScrapeSession
-from .fields import now_iso
+from .fields import now_iso, extract_labeled_fields, experience_year_range
 from .clean_html import html_to_plain_text
 from .detect_language import detect_language
+from .urlutils import normalize_website, hostname
 
 log = logging.getLogger("job_scraper")
+_RETRYABLE_STATUSES = {"Unreachable", "Career Page Not Found",
+                       "Career Page Found - Extraction Unsupported", "Error"}
 
 
 def read_companies(input_file):
@@ -49,6 +53,33 @@ def load_completed(output_file):
     return done
 
 
+def remove_retryable_rows(output_file):
+    if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+        return 0
+    with open(output_file, "r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    kept = [row for row in rows if row.get("job_status") not in _RETRYABLE_STATUSES]
+    removed = len(rows) - len(kept)
+    if not removed:
+        return 0
+    directory = os.path.dirname(os.path.abspath(output_file))
+    fd, temporary = tempfile.mkstemp(prefix=".retry_", suffix=".csv", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(kept)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output_file)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return removed
+
+
 class CsvWriter:
     def __init__(self, path, columns):
         self.path = path
@@ -76,11 +107,7 @@ class CsvWriter:
 
 
 def _company_key(row):
-    return "%s|%s" % (row[0], row[2] and _norm(row[1]) or row[1])
-
-
-def _norm(url):
-    return url
+    return "%s|%s" % (row[0], row[1])
 
 
 def run(
@@ -93,6 +120,7 @@ def run(
     countries=None,
     quiet=True,
     enable_search=True,
+    retry_failures=False,
 ):
     logging.basicConfig(
         level=logging.INFO,
@@ -116,6 +144,9 @@ def run(
         companies = companies[:limit]
     log.info("Companies to process this run: %d", len(companies))
 
+    if retry_failures:
+        removed = remove_retryable_rows(output_file)
+        log.info("Removed %d retry-eligible rows before reprocessing", removed)
     writer = CsvWriter(output_file, OUTPUT_COLUMNS)
     completed = load_completed(output_file) if resume else set()
     todo = [c for c in companies if _company_key(c) not in completed]
@@ -125,13 +156,45 @@ def run(
                 "career_not_found": 0, "unreachable": 0, "error": 0, "jobs": 0}
     counters_lock = threading.Lock()
     session_factory = lambda: ScrapeSession()
+    domain_results = {}
+    domain_inflight = {}
+    domain_cache_lock = threading.Lock()
+
+    def process_with_domain_cache(row, session):
+        cache_key = hostname(normalize_website(row[1])) if row[1] else ""
+        if not cache_key:
+            return process_company_details(row, session, enable_search=enable_search)
+        owner = False
+        with domain_cache_lock:
+            if cache_key in domain_results:
+                return domain_results[cache_key]
+            event = domain_inflight.get(cache_key)
+            if event is None:
+                event = threading.Event()
+                domain_inflight[cache_key] = event
+                owner = True
+        if not owner:
+            event.wait()
+            with domain_cache_lock:
+                if cache_key in domain_results:
+                    return domain_results[cache_key]
+            return process_company_details(row, session, enable_search=enable_search)
+        try:
+            details = process_company_details(row, session, enable_search=enable_search)
+            with domain_cache_lock:
+                domain_results[cache_key] = details
+            return details
+        finally:
+            with domain_cache_lock:
+                domain_inflight.pop(cache_key, None)
+                event.set()
 
     def process(row):
         key = _company_key(row)
         name, web, country = row
         try:
             session = session_factory()
-            details = process_company_details(row, session, enable_search=enable_search)
+            details = process_with_domain_cache(row, session)
             status, jobs, source = details["status"], details["jobs"], details["source"]
         except Exception as exc:
             status, jobs, source = "error", [], str(exc)[:200]
@@ -142,6 +205,9 @@ def run(
         for j in jobs:
             raw_description = j.get("job_description", "")
             clean_description = html_to_plain_text(raw_description)
+            labeled = extract_labeled_fields(clean_description)
+            experience_text = j.get("years_of_experience", "") or labeled.get("years_of_experience", "")
+            derived_experience_min, derived_experience_max = experience_year_range(experience_text)
             job_source = j.get("source", "") or source
             structured_source = job_source in ("jsonld", "microdata", "hrmanager-detail")
             out_rows.append({
@@ -159,14 +225,15 @@ def run(
                 "closed_date": j.get("closed_date", ""),
                 "job_status": j.get("job_status", "Active"),
                 "extraction_status": "Job Detail Extracted",
-                "extraction_confidence": "High" if structured_source else "Medium",
-                "extraction_evidence": job_source,
+                "extraction_confidence": j.get("extraction_confidence") or
+                                         ("High" if structured_source else "Medium"),
+                "extraction_evidence": j.get("extraction_evidence") or job_source,
                 "last_checked_at": j.get("last_checked_at", ""),
                 "education_stream": j.get("education_stream", ""),
                 "education_type": j.get("education_type", ""),
                 "education_qualification": j.get("education_qualification", ""),
-                "years_of_experience_min": j.get("years_of_experience_min", ""),
-                "years_of_experience_max": j.get("years_of_experience_max", ""),
+                "years_of_experience_min": j.get("years_of_experience_min", "") or derived_experience_min,
+                "years_of_experience_max": j.get("years_of_experience_max", "") or derived_experience_max,
                 "seniority_level": j.get("seniority_level", ""),
                 "employment_type": j.get("employment_type", ""),
                 "skills": j.get("skills", ""),

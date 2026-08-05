@@ -1,7 +1,8 @@
 """OpenRouter post-processing for job CSVs.
 
 This module never runs as part of scraping. Invoke it explicitly after setting
-OPENROUTER_API_KEY. Rows are saved atomically after every successful extraction.
+OPENROUTER_API_KEY. Each result is durably appended to a sidecar, and the final
+CSV is rewritten atomically once per run.
 """
 
 import argparse
@@ -163,6 +164,28 @@ def _append_checkpoint(path, identifier):
         os.fsync(handle.fileno())
 
 
+def _append_result(path, identifier, result):
+    with open(path, "a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps({"row_id": identifier, "result": result}, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _load_results(path):
+    results = {}
+    if not os.path.exists(path):
+        return results
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                item = json.loads(line)
+                if item.get("row_id") and isinstance(item.get("result"), dict):
+                    results[item["row_id"]] = item["result"]
+            except (json.JSONDecodeError, AttributeError):
+                continue
+    return results
+
+
 def _log_error(path, identifier, row, error):
     exists = os.path.exists(path) and os.path.getsize(path) > 0
     with open(path, "a", encoding="utf-8-sig", newline="") as handle:
@@ -181,6 +204,7 @@ def process_csv(input_path, output_path=None, checkpoint_path=None, errors_path=
         raise RuntimeError("OPENROUTER_API_KEY is not set")
     output_path = output_path or input_path
     checkpoint_path = checkpoint_path or (output_path + ".checkpoint")
+    results_path = output_path + ".llm_results.jsonl"
     errors_path = errors_path or os.path.join(os.path.dirname(os.path.abspath(output_path)), "extraction_errors.csv")
     rows = _read_csv(output_path if os.path.exists(output_path) else input_path)
     required_columns = ["years_of_experience_min", "years_of_experience_max", "seniority_level",
@@ -190,13 +214,18 @@ def process_csv(input_path, output_path=None, checkpoint_path=None, errors_path=
         if column not in fieldnames:
             fieldnames.append(column)
     processed = _load_checkpoint(checkpoint_path)
+    saved_results = _load_results(results_path)
+    for row in rows:
+        saved = saved_results.get(row_id(row))
+        if saved:
+            row.update(saved)
     for row in rows:
         identifier = row_id(row)
         if identifier in processed:
             continue
         try:
             result = request_fn(row.get("job_title", ""), row.get("job_description_clean", ""), key, model=model)
-            row.update(validate_extraction({
+            validated = validate_extraction({
                 "years_of_experience_min": result.get("years_of_experience_min") if result.get("years_of_experience_min") != "" else None,
                 "years_of_experience_max": result.get("years_of_experience_max") if result.get("years_of_experience_max") != "" else None,
                 "seniority_level": result.get("seniority_level") or None,
@@ -205,13 +234,17 @@ def process_csv(input_path, output_path=None, checkpoint_path=None, errors_path=
                 "education_qualification": result.get("education_qualification") or None,
                 "skills": [s.strip() for s in result.get("skills", "").split(";") if s.strip()],
                 "salary_disclosed": bool(result.get("salary_disclosed")),
-            }, row.get("job_description_clean", "")))
-            _atomic_write_csv(output_path, rows, fieldnames)
+            }, row.get("job_description_clean", ""))
+            row.update(validated)
+            # Append a durable result before checkpointing. A crash can resume
+            # without rewriting or re-calling completed rows.
+            _append_result(results_path, identifier, validated)
             _append_checkpoint(checkpoint_path, identifier)
             processed.add(identifier)
         except Exception as exc:
             logging.exception("Extraction failed for %s", identifier)
             _log_error(errors_path, identifier, row, exc)
+    _atomic_write_csv(output_path, rows, fieldnames)
     return rows
 
 

@@ -31,7 +31,7 @@ ATS_URL_PATTERNS = [
     ("zoho", re.compile(r"([a-zA-Z0-9\-_]+)\.zohorecruit\.(?:com|eu|in|jp|com\.au|com\.mx)")),
     ("freshteam", re.compile(r"([a-zA-Z0-9\-_]+)\.freshteam\.com")),
     ("jobadder", re.compile(r"([a-zA-Z0-9\-_]+)\.jobadder\.com")),
-    ("bulhorn", re.compile(r"(?:bulhorn|vault)\.com")),
+    ("bullhorn", re.compile(r"(?:bullhorn|bulhorn|vault)\.com")),
     ("hrmanager", re.compile(r"candidate\.hr-manager\.net/(?:ApplicationInit\.aspx)?", re.I)),
     ("workable", re.compile(r"([a-zA-Z0-9\-_]+)\.workable\.com")),
 ]
@@ -60,7 +60,7 @@ ATS_HTML_MARKERS = [
     ("zoho", ["zohorecruit", "Zoho Recruit"]),
     ("freshteam", ["freshteam.com", "Freshteam"]),
     ("jobadder", ["jobadder.com", "JobAdder"]),
-    ("bulhorn", ["bulhorn.com"]),
+    ("bullhorn", ["bullhorn.com", "bulhorn.com"]),
     ("indeed", ["indeed.com"]),
     ("adzuna", ["adzuna"]),
 ]
@@ -71,6 +71,7 @@ CAREER_KEYWORDS = [
     r"jobs?",
     r"join[\s_-]*us",
     r"joinus",
+    r"join[\s_-]*(?:our[\s_-]*)?team",
     r"vacancies?",
     r"job-openings",
     r"open-positions",
@@ -219,12 +220,18 @@ def validate_career_page(url, html_text, company_home_url=""):
                        registrable_domain(candidate_host) == registrable_domain(company_host))
     ats, _ = detect_ats_in_url(url)
     soup = BeautifulSoup(html_text, "html.parser")
+    visible = soup.get_text(" ", strip=True)
+    if re.search(r"\b(page not found|404 not found|page does not exist|seite nicht gefunden|"
+                 r"page introuvable|página no encontrada)\b", visible, re.I):
+        return False
     title = soup.title.get_text(" ", strip=True) if soup.title else ""
     headings = " ".join(tag.get_text(" ", strip=True) for tag in soup.find_all(["h1", "h2", "h3"]))
-    page_signal = is_career_link(title + " " + headings, url)
+    page_signal = is_career_link(title + " " + headings, "")
     jobposting_signal = bool(re.search(r'[@\"\']type[\"\']?\s*:\s*[\"\']JobPosting', html_text, re.I))
-    job_link_signal = any(is_career_link(a.get_text(" ", strip=True), a.get("href", ""))
-                          for a in soup.find_all("a", href=True)[:500])
+    main = soup.find("main") or soup.find("article")
+    job_link_signal = bool(main and any(
+        is_career_link(a.get_text(" ", strip=True), a.get("href", ""))
+        for a in main.find_all("a", href=True)[:500]))
     return bool((same_domain or ats) and (ats or page_signal or jobposting_signal or job_link_signal))
 
 

@@ -19,7 +19,7 @@ from .parsers_generic import parse_generic
 _KNOWN_GENERIC = {
     "teamtailor", "softgarden", "join", "bamboo", "icims", "taleo",
     "jobvite", "oracle", "pinpoint", "zoho", "freshteam",
-    "jobadder", "bulhorn", "indeed", "adzuna",
+    "jobadder", "bullhorn", "indeed", "adzuna",
     "avature", "talentsoft", "hrmanager",
 }
 
@@ -62,6 +62,8 @@ def _ats_info(ats, url, captured):
 
 def _dispatch(session, ats, url, captured):
     info = _ats_info(ats, url, captured)
+    if ats == "smartrecruiters" and not info.get("board"):
+        return []
     parser = _API_PARSERS.get(ats)
     if parser:
         try:
@@ -126,7 +128,7 @@ def process_company_details(company_row, session=None, enable_search=True):
     jobs = []
     tried = set()
     homepage_html = None
-    explicit_no_jobs = False
+    explicit_no_jobs_pages = set()
 
     # 1. fetch homepage
     resp = session.fetch(base, timeout=20)
@@ -165,18 +167,23 @@ def process_company_details(company_row, session=None, enable_search=True):
     # 2. build candidate career urls
     candidates = []
     soup = BeautifulSoup(homepage_html or "", "html.parser")
-    found_links = find_career_links(soup, homepage_url, limit=MAX_CAREER_LINKS)
+    # Gather a wider pool before ranking. Otherwise several regional job links
+    # can crowd the official careers root out of the fixed-size candidate list.
+    found_links = find_career_links(soup, homepage_url, limit=MAX_CAREER_LINKS * 3)
     candidates.extend(found_links)
     candidate_methods = {url: "homepage_link" for url in found_links}
-    if not found_links:
-        # probe a handful of common paths
-        for u, _ in common_career_urls(homepage_url)[:4]:
+    # Merge discovery channels instead of allowing one weak homepage match to
+    # suppress every fallback.
+    for u, _ in common_career_urls(homepage_url)[:4]:
+        candidates.append(u)
+        candidate_methods.setdefault(u, "common_path_probe")
+    strong_homepage_link = any(re.search(
+        r"(?:career|jobs?|vacanc|join[-_/ ]?us|work[-_/ ]?with)", u, re.I)
+        for u in found_links)
+    if enable_search and not strong_homepage_link:
+        for u in search_company_career_pages(name, homepage_url, session, country=country):
             candidates.append(u)
-            candidate_methods[u] = "common_path_probe"
-        if enable_search:
-            for u in search_company_career_pages(name, homepage_url, session, country=country):
-                candidates.append(u)
-                candidate_methods[u] = "web_search"
+            candidate_methods.setdefault(u, "web_search")
 
     # dedupe candidates
     seen = set()
@@ -188,7 +195,27 @@ def process_company_details(company_row, session=None, enable_search=True):
             seen.add(normalized)
             cands.append(normalized)
             candidate_methods[normalized] = method
-    candidates = cands[:MAX_CAREER_LINKS]
+    def candidate_priority(value):
+        method = candidate_methods.get(value, "")
+        strong = bool(re.search(r"career|jobs?|vacanc|join[-_/ ]?us|work[-_/ ]?with", value, re.I))
+        ats_name, _ = detect_ats_in_url(value)
+        path = urlparse(value).path.rstrip("/").lower()
+        career_root = bool(re.search(r"/(?:[a-z]{2}(?:-[a-z]{2})?/)?careers?$", path))
+        regional_jobs = bool(re.search(r"/careers?/jobs?/.+", path))
+        base_score = {"homepage_link": 30 if strong else 15,
+                      "web_search": 20, "common_path_probe": 10}.get(method, 0)
+        if career_root:
+            base_score += 50
+        if ats_name:
+            base_score += 35
+        if regional_jobs:
+            base_score -= 20
+        return (-base_score, -strong, len(value))
+
+    candidates = sorted(
+        cands,
+        key=candidate_priority,
+    )[:MAX_CAREER_LINKS]
 
     # 3. Process explicit career candidates. A vendor marker on a homepage is
     # not enough to call the homepage a career page.
@@ -204,7 +231,7 @@ def process_company_details(company_row, session=None, enable_search=True):
             continue
         if cand_html and _EXPLICIT_NO_JOBS_RE.search(
                 BeautifulSoup(cand_html, "html.parser").get_text(" ", strip=True)):
-            explicit_no_jobs = True
+            explicit_no_jobs_pages.add(cand)
         if not discovery["career_page_url"] and (
                 (cand_html and validate_career_page(cand, cand_html, homepage_url)) or ats):
             discovery.update({
@@ -243,7 +270,10 @@ def process_company_details(company_row, session=None, enable_search=True):
             from .parsers_jsonld import parse_jsonld_jobs
             jobs = parse_jsonld_jobs(homepage_html, homepage_url)
         if not jobs:
-            if explicit_no_jobs:
+            # A regional page saying "no jobs" is not evidence that the whole
+            # company has no openings. Only apply it to the selected official
+            # page, and never override a recognized but unsupported ATS board.
+            if (discovery["career_page_url"] in explicit_no_jobs_pages and not sources):
                 return result("no_jobs", [], ";".join(sources))
             if discovery["career_page_url"]:
                 return result("unsupported", [], ";".join(sources))

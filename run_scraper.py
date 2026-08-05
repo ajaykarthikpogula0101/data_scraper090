@@ -20,6 +20,8 @@ def main():
     ap.add_argument("--no-resume", action="store_true", help="Ignore existing output rows")
     ap.add_argument("--countries", default="", help="Comma-separated country filter")
     ap.add_argument("--no-search", action="store_true", help="Disable website lookup by company name")
+    ap.add_argument("--retry-failures", action="store_true",
+                    help="Reprocess prior Unreachable/Not Found/Unsupported company rows")
     ap.add_argument("--verify", metavar="COMPANY_NAME", help="Run a single company and print its jobs")
     args = ap.parse_args()
 
@@ -64,6 +66,7 @@ def main():
         resume=not args.no_resume,
         countries=countries,
         enable_search=not args.no_search,
+        retry_failures=args.retry_failures,
     )
     pprint.pprint(counters)
     print("Output written to:", args.output)

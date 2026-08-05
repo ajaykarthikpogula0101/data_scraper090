@@ -57,6 +57,19 @@ def _lookup_employment(d, keys=("work type", "employment type", "type", "job typ
     return ""
 
 
+def _location_text(value):
+    if isinstance(value, list):
+        return "; ".join(filter(None, (_location_text(item) for item in value)))
+    if isinstance(value, dict):
+        parts = []
+        for key in ("name", "fullLocation", "location", "city", "region", "state", "country"):
+            text = clean_text(value.get(key))
+            if text and text not in parts:
+                parts.append(text)
+        return ", ".join(parts)
+    return clean_text(value)
+
+
 # ---------------------------------------------------------------------------
 # Greenhouse
 # ---------------------------------------------------------------------------
@@ -75,7 +88,7 @@ def parse_greenhouse(session, info):
         j["job_description"] = _strip_html(item.get("content"))
         loc = item.get("location") or {}
         if isinstance(loc, dict):
-            j["location"] = clean_text(loc.get("name"))
+            j["job_location"] = clean_text(loc.get("name"))
         meta = _meta_to_dict(item.get("metadata"))
         j["employment_type"] = _lookup_employment(meta)
         for d in item.get("departments") or []:
@@ -101,13 +114,13 @@ def parse_lever(session, info):
         j["posted_date"] = parse_date(item.get("createdAt"))
         cats = item.get("categories") or {}
         j["employment_type"] = clean_text(cats.get("commitment"))
+        j["job_location"] = _location_text(cats.get("location") or item.get("workplaceType") or
+                                             item.get("allLocations"))
         j["job_description"] = clean_text(item.get("descriptionPlain") or item.get("description"))
         j["salary"] = clean_text(item.get("salaryRange"))
         j["source"] = "lever"
         jobs.append(j)
     return jobs
-
-
 # ---------------------------------------------------------------------------
 # SmartRecruiters
 # ---------------------------------------------------------------------------
@@ -145,7 +158,7 @@ def parse_smartrecruiters(session, info):
             j["seniority_level"] = _sr_label(item.get("experienceLevel"))
             loc = item.get("location")
             if isinstance(loc, dict):
-                j["location"] = clean_text(loc.get("fullLocation") or loc.get("city"))
+                j["job_location"] = clean_text(loc.get("fullLocation") or loc.get("city"))
             j["job_url"] = clean_text(item.get("postingUrl")) or (
                 "https://jobs.smartrecruiters.com/%s/%s" % (slug, item.get("id")))
             jobs.append(j)
@@ -204,6 +217,8 @@ def parse_workable(session, info):
         j = make_job("workable", item.get("title"), item.get("url") or item.get("shortlink"))
         j["posted_date"] = parse_date(item.get("published_on") or item.get("created_at") or item.get("created"))
         j["employment_type"] = clean_text(item.get("employment_type"))
+        j["job_location"] = _location_text(item.get("location") or item.get("locations") or
+                                             item.get("office"))
         j["seniority_level"] = clean_text(item.get("seniority"))
         j["job_description"] = _strip_html(item.get("description"))
         j["salary"] = clean_text(item.get("salary"))
@@ -229,6 +244,8 @@ def parse_recruitee(session, info):
         j = make_job("recruitee", item.get("title"))
         j["posted_date"] = parse_date(item.get("created_at") or item.get("published_at"))
         j["employment_type"] = clean_text(item.get("employment_type"))
+        j["job_location"] = _location_text(item.get("location") or item.get("locations") or
+                                             item.get("city") or item.get("country"))
         j["job_description"] = _strip_html(item.get("description"))
         slug_name = item.get("slug")
         j["job_url"] = "https://%s.recruitee.com/o/%s" % (slug, slug_name or item.get("id"))
@@ -257,6 +274,7 @@ def parse_breezy(session, info):
                 j["posted_date"] = parse_date(item.get("created_at") or item.get("published_at"))
                 j["job_description"] = _strip_html(item.get("description"))
                 j["employment_type"] = clean_text(item.get("type") or item.get("employment_type"))
+                j["job_location"] = _location_text(item.get("location") or item.get("locations"))
                 j["job_url"] = j["job_url"] or "https://%s.breezy.hr/p/%s" % (slug, item.get("slug"))
                 jobs.append(j)
             if jobs:
@@ -289,6 +307,8 @@ def parse_jazzhr(session, info):
                 j["job_description"] = _strip_html(item.get("description") or item.get("job_description"))
                 j["job_url"] = clean_text(item.get("apply_url") or item.get("url"))
                 j["salary"] = clean_text(item.get("salary") or item.get("pay_range"))
+                j["job_location"] = _location_text(item.get("location") or item.get("locations") or
+                                                     item.get("city"))
                 jobs.append(j)
             break
     return jobs
@@ -349,7 +369,7 @@ def _personio_xml_item(p, slug, tld):
         for o in add.findall("office"):
             if o.text:
                 offices.append(clean_text(o.text))
-    j["location"] = ", ".join(x for x in offices if x)
+    j["job_location"] = ", ".join(x for x in offices if x)
     j["employment_type"] = tx("schedule") or tx("employmentType")
     if tx("employmentType").lower() == "intern":
         j["employment_type"] = "Internship"
@@ -383,7 +403,7 @@ def _personio_item(item, slug, base):
     j["posted_date"] = parse_date(item.get("publishedAt") or item.get("publishedAt"))
     j["employment_type"] = clean_text(item.get("employmentType") or item.get("workType") or item.get("schedule"))
     j["job_description"] = clean_text(item.get("description") or item.get("jobDescription"))
-    j["location"] = clean_text(item.get("location") or item.get("workplace"))
+    j["job_location"] = _location_text(item.get("location") or item.get("workplace"))
     j["seniority_level"] = clean_text(item.get("seniorityLevel") or item.get("careerLevel"))
     j["salary"] = clean_text(item.get("salary") or item.get("salaryInformation"))
     return j
@@ -418,7 +438,7 @@ def parse_workday(session, info):
             j["posted_date"] = parse_date(it.get("postedOn") or it.get("postedOnDateTime"))
             j["employment_type"] = clean_text(it.get("jobRequisitionType") or it.get("workerType") or it.get("timeType"))
             locs = it.get("locationsText") or it.get("locations") or ""
-            j["location"] = clean_text(locs)
+            j["job_location"] = _location_text(locs)
             j["salary"] = clean_text(it.get("compensation") or it.get("payRate"))
             jobs.append(j)
         total = data.get("total") or 0
@@ -515,8 +535,6 @@ def parse_successfactors(session, info):
                     j[key] = labeled[key]
             jobs.append(j)
     return jobs
-
-
 # ---------------------------------------------------------------------------
 # BambooHR
 # ---------------------------------------------------------------------------
