@@ -12,9 +12,11 @@ from .ats import (
 )
 from .urlutils import ensure_https, normalize_website, hostname
 from .session import ScrapeSession
-from .websearch import search_company_website, search_company_career_pages
+from .websearch import (search_company_website, search_company_career_pages,
+                        search_company_job_pages)
 from . import parsers_ats
 from .parsers_generic import parse_generic
+from .fields import clean_text
 
 _KNOWN_GENERIC = {
     "teamtailor", "softgarden", "join", "bamboo", "icims", "taleo",
@@ -116,11 +118,68 @@ def process_company_details(company_row, session=None, enable_search=True):
     def result(status, jobs, source):
         return {"status": status, "jobs": jobs, "source": source, **discovery}
 
+    def internet_job_fallback(official_url):
+        """Search by company name, then verify every result before extraction."""
+        if not enable_search:
+            return []
+        found_jobs = []
+        search_candidates = search_company_job_pages(
+            name, official_url or website, session, country=country, limit=8)
+        for candidate in search_candidates:
+            candidate_html = session.fetch_text(candidate, timeout=30)
+            if not candidate_html:
+                continue
+            page_text = clean_text(BeautifulSoup(candidate_html, "html.parser").get_text(" ", strip=True),
+                                   max_len=50000)
+            name_tokens = [token for token in re.findall(r"[a-z0-9]+", name.lower())
+                           if len(token) >= 3 and token not in {"gmbh", "ltd", "llc", "inc", "company", "group"}]
+            company_evidence = any(token in page_text.lower() for token in name_tokens)
+            same_domain = hostname(candidate) == hostname(official_url or website)
+            ats, captured = detect_ats_in_url(candidate)
+            ats_evidence = bool(ats and captured and any(token in captured.lower() for token in name_tokens))
+            job_evidence = bool(re.search(
+                r"\b(?:apply|job description|responsibilities|qualifications|vacancy|"
+                r"stellenangebot|aufgaben|bewerb(?:en|ung))\b", page_text, re.I))
+            if not (job_evidence and (same_domain or ats_evidence or company_evidence)):
+                continue
+            parsed = parse_generic(session, candidate)
+            if not parsed:
+                continue
+            for job in parsed:
+                job["source"] = job.get("source") or "internet-company-name-search"
+            found_jobs.extend(parsed)
+            if len(found_jobs) >= 50:
+                break
+        if found_jobs:
+            first_url = found_jobs[0].get("job_url", "")
+            discovery.update({
+                "career_page_url": first_url,
+                "career_page_status": "Validated",
+                "career_page_discovery_method": "internet_company_name_search",
+            })
+        elif not discovery.get("career_page_url"):
+            discovery.update({
+                "career_page_status": "Search Completed - No Verified Jobs",
+                "career_page_discovery_method": "internet_company_name_search_no_verified_results",
+            })
+        import logging
+        logging.getLogger("job_scraper").info(
+            "Internet job search company=%s candidates=%d verified_jobs=%d",
+            name, len(search_candidates), len(found_jobs))
+        return found_jobs
+
+    def terminal_or_internet_search(status, source, official_url):
+        fallback_jobs = internet_job_fallback(official_url)
+        if fallback_jobs:
+            return result("ok", fallback_jobs, "internet-company-name-search")
+        evidence = source or "internet-company-name-search:no-verified-results"
+        return result(status, [], evidence)
+
     if not base:
         if enable_search:
             found = search_company_website(name, session, country=country)
             if not found:
-                return result("unreachable", [], "no_website")
+                return terminal_or_internet_search("unreachable", "no_website", website)
             base = found[0]
             sources.append("websearch")
         else:
@@ -158,9 +217,11 @@ def process_company_details(company_row, session=None, enable_search=True):
                         if "json" not in ctype.lower():
                             homepage_html = resp3.text
                     else:
-                        return result("unreachable", [], ";".join(sources))
+                        return terminal_or_internet_search(
+                            "unreachable", ";".join(sources), base)
                 else:
-                    return result("unreachable", [], ";".join(sources))
+                    return terminal_or_internet_search(
+                        "unreachable", ";".join(sources), base)
             else:
                 return result("unreachable", [], "")
 
@@ -270,6 +331,8 @@ def process_company_details(company_row, session=None, enable_search=True):
             from .parsers_jsonld import parse_jsonld_jobs
             jobs = parse_jsonld_jobs(homepage_html, homepage_url)
         if not jobs:
+            jobs = internet_job_fallback(homepage_url)
+        if not jobs:
             # A regional page saying "no jobs" is not evidence that the whole
             # company has no openings. Only apply it to the selected official
             # page, and never override a recognized but unsupported ATS board.
@@ -278,6 +341,8 @@ def process_company_details(company_row, session=None, enable_search=True):
             if discovery["career_page_url"]:
                 return result("unsupported", [], ";".join(sources))
             return result("career_not_found", [], ";".join(sources))
+        if discovery.get("career_page_discovery_method") == "internet_company_name_search":
+            return result("ok", jobs, "internet-company-name-search")
         if not discovery["career_page_url"]:
             discovery.update({
                 "career_page_url": homepage_url,

@@ -290,10 +290,41 @@ class DataQualityTests(unittest.TestCase):
     def test_career_web_search_rejects_unrelated_results(self):
         results = ["https://example.com/careers", "https://jobs.lever.co/example",
                    "https://unrelated.test/jobs", "https://jobs.lever.co/another-company"]
-        with patch.object(websearch, "_search_bing_rss", return_value=results):
+        with patch.object(websearch, "_search_bing_rss", return_value=results), \
+                patch.object(websearch, "_search_duckduckgo", return_value=[]):
             found = websearch.search_company_career_pages(
                 "Example Ltd", "https://example.com", object(), limit=5)
         self.assertEqual(found, ["https://example.com/careers", "https://jobs.lever.co/example"])
+
+    def test_company_job_search_merges_engines_and_filters_results(self):
+        bing = ["https://irrelevant.test/news", "https://example.test/careers/job/engineer"]
+        duck = ["https://jobs.lever.co/example/abc"]
+        with patch.object(websearch, "_search_bing_rss", return_value=bing), \
+                patch.object(websearch, "_search_duckduckgo", return_value=duck):
+            found = websearch.search_company_job_pages(
+                "Example Ltd", "https://example.test", object(), country="India")
+        self.assertIn("https://example.test/careers/job/engineer", found)
+        self.assertIn("https://jobs.lever.co/example/abc", found)
+        self.assertNotIn("https://irrelevant.test/news", found)
+
+    def test_unreachable_website_uses_company_name_job_search(self):
+        job = empty_job()
+        job.update({"job_title": "Engineer", "job_url": "https://jobs.example.test/engineer",
+                    "job_status": "Active", "source": "generic-detail"})
+        class SearchSession:
+            def fetch(self, *args, **kwargs):
+                return None
+            def fetch_text(self, url, **kwargs):
+                return "<main><h1>Example Engineer</h1><p>Job description and qualifications. Apply now.</p></main>"
+        with patch("job_scraper.company.search_company_website", return_value=[]), \
+                patch("job_scraper.company.search_company_job_pages",
+                      return_value=["https://jobs.example.test/engineer"]), \
+                patch("job_scraper.company.parse_generic", return_value=[job]):
+            result = process_company_details(
+                ("Example Ltd", "https://dead.example.test", "India"), session=SearchSession())
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["career_page_discovery_method"], "internet_company_name_search")
+        self.assertEqual(result["jobs"][0]["job_title"], "Engineer")
 
     def test_regional_no_jobs_does_not_override_official_ats(self):
         homepage = '''<a href="/en/careers/jobs/thailand/">Thailand job openings</a>

@@ -143,9 +143,9 @@ def search_company_career_pages(name, official_url, session, country=None, limit
     results = []
     for query in queries:
         results.extend(_search_bing_rss(session, query))
-    if not results:
-        for query in queries[:2]:
-            results.extend(_search_duckduckgo(session, query))
+        # Irrelevant Bing results used to suppress this second engine entirely.
+        # Merge both channels and filter afterward instead.
+        results.extend(_search_duckduckgo(session, query))
     accepted = []
     seen = set()
     company_tokens = _tokens(name)
@@ -158,6 +158,49 @@ def search_company_career_pages(name, official_url, session, country=None, limit
         same_domain = result_domain == official_domain
         ats_matches_company = bool(ats and captured and any(token in captured.lower() for token in company_tokens))
         if not ((same_domain and is_career_link("", url)) or ats_matches_company):
+            continue
+        seen.add(url)
+        accepted.append(url)
+        if len(accepted) >= limit:
+            break
+    return accepted
+
+
+def search_company_job_pages(name, official_url, session, country=None, limit=8):
+    """Search by company name for likely career boards or individual jobs.
+
+    Results are candidates only. The caller must fetch the page and verify the
+    company identity before exporting a job.
+    """
+    official_domain = registrable_domain(hostname(ensure_https(official_url)))
+    queries = ['"%s" jobs careers' % name, '%s jobs careers' % name]
+    if country:
+        queries[0] += " " + country
+    if official_domain:
+        queries.insert(0, "site:%s (jobs OR careers OR vacancies OR stellenangebote)" % official_domain)
+    results = []
+    for query in queries[:3]:
+        results.extend(_search_bing_rss(session, query))
+        results.extend(_search_duckduckgo(session, query))
+    tokens = _tokens(name)
+    accepted = []
+    seen = set()
+    for raw_url in results:
+        url = ensure_https(raw_url).split("#")[0]
+        if not url or url in seen:
+            continue
+        result_domain = registrable_domain(hostname(url))
+        ats, captured = detect_ats_in_url(url)
+        same_domain_job = bool(result_domain == official_domain and is_career_link("", url))
+        ats_company_match = bool(
+            ats and captured and any(len(token) >= 3 and token in captured.lower() for token in tokens)
+        )
+        job_board_detail = bool(
+            re.search(r"(?:linkedin|indeed|glassdoor|stepstone|monster|ziprecruiter|xing)\.",
+                      hostname(url), re.I)
+            and re.search(r"/(?:jobs?|viewjob|job-listing|stellenangebote?)/|[?&](?:jk|jobId)=", url, re.I)
+        )
+        if not (same_domain_job or ats_company_match or job_board_detail):
             continue
         seen.add(url)
         accepted.append(url)
